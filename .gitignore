@@ -1,0 +1,22 @@
+# Unreal Engine build artifacts
+Binaries/
+Intermediate/
+Saved/
+
+# Debug symbols (if Binaries is ever included)
+*.pdb
+
+# Documentation (internal only)
+*.md
+
+# IDE files
+.vs/
+.vscode/
+.idea/
+*.sln
+*.suo
+*.user
+
+# OS files
+.DS_Store
+Thumbs.db
