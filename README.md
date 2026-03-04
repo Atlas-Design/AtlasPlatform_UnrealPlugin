@@ -25,6 +25,12 @@
 
 ---
 
+> ⚠️ **Early Access Notice**
+> 
+> This plugin is currently in **early development**. Some features may be incomplete, and you may encounter bugs. We appreciate your patience and welcome feedback via [GitHub Issues](https://github.com/Atlas-Design/AtlasPlatform_UnrealPlugin/issues).
+
+---
+
 ## 📋 Table of Contents
 
 - [Overview](#-overview)
@@ -36,11 +42,9 @@
 - [Documentation](#-documentation)
   - [Core Concepts](#core-concepts)
   - [Blueprint API](#blueprint-api)
-  - [C++ API](#c-api)
   - [Input Types](#input-types)
   - [Output Types](#output-types)
 - [Configuration](#-configuration)
-- [Module Structure](#-module-structure)
 - [Troubleshooting](#-troubleshooting)
 - [License](#-license)
 
@@ -56,7 +60,6 @@ Whether you're generating textures, creating 3D models, or running complex multi
 
 - **Native Unreal Integration** — Execute workflows from Editor or Runtime
 - **Full Blueprint Support** — Async nodes, type-safe inputs, and easy integration
-- **C++ API** — Complete native API for advanced use cases
 - **Runtime Ready** — Works in packaged builds, not just editor
 - **Asset Pipeline Support** — Automatic import of textures (PNG) and meshes (GLB/FBX)
 - **Full Job History** — Track, inspect, and replay any previous workflow execution
@@ -80,7 +83,7 @@ Whether you're generating textures, creating 3D models, or running complex multi
 - ▶️ **One-Click Execution** — Run workflows from Editor UI or Blueprint
 - 📊 **Live Progress Tracking** — Monitor job phases (Upload → Execute → Download)
 - ⏱️ **Configurable Timeouts** — Set execution limits up to 60 minutes
-- 🔔 **State Callbacks** — Respond to job state changes in Blueprint or C++
+- 🔔 **State Callbacks** — Respond to job state changes in Blueprint
 
 ### Job History & Results
 - 📜 **Complete History** — Browse all past workflow executions
@@ -122,6 +125,12 @@ Whether you're generating textures, creating 3D models, or running complex multi
 </p>
 
 <p align="center">
+  <img src="Docs/Images/JobCompleted.png" alt="Job Completed" width="80%"/>
+  <br/>
+  <em>Completed Job — View and download generated outputs</em>
+</p>
+
+<p align="center">
   <img src="Docs/Images/Settings.png" alt="Editor Preferences" width="80%"/>
   <br/>
   <em>Editor Preferences — Configure output paths, timeouts, and caching</em>
@@ -135,7 +144,6 @@ Whether you're generating textures, creating 3D models, or running complex multi
 |-------------|---------|
 | **Unreal Engine** | 5.5 or newer |
 | **Platform** | Windows (macOS/Linux untested) |
-| **C++ Standard** | C++17 |
 
 ### Plugin Dependencies (Auto-enabled)
 
@@ -173,9 +181,15 @@ git clone https://github.com/Atlas-Design/AtlasPlatform_UnrealPlugin.git AtlasWo
 ### Verifying Installation
 
 After installation, you should see:
-- **Window → Atlas Workflow** menu item
+- **Window → Atlas → Atlas Workflow** menu item
 - **Edit → Editor Preferences → Plugins → Atlas SDK** settings section
 - **AtlasWorkflow Content** folder in Content Browser
+
+<p align="center">
+  <img src="Docs/Images/WindowMenu.png" alt="Window Menu" width="50%"/>
+  <br/>
+  <em>Access Atlas Workflow from the Window menu</em>
+</p>
 
 ---
 
@@ -195,58 +209,43 @@ Go to **Edit → Editor Preferences → Plugins → Atlas SDK** and configure:
 - **Default Import Path** — Content Browser location for imported assets
 - **Request Timeout** — Maximum time for API requests
 
-#### Step 3: Load a Workflow
+#### Step 3: Import a Workflow
 
 1. Open the Atlas Workflow window via **Window → Atlas → Atlas Workflow**
-2. In the workflow panel, select a Workflow Asset from your Content Browser
-3. Configure input values using the input panel
+2. Click the **Import** button in the Workflow Library panel
+3. Select a workflow JSON file exported from the Atlas Platform
+4. The workflow will appear in your library and be ready to use
 
-#### Step 4: Execute
+<p align="center">
+  <img src="Docs/Images/ImportWorkflow.png" alt="Import Workflow" width="70%"/>
+  <br/>
+  <em>Import workflows using the Import button — select JSON files from the Atlas Platform</em>
+</p>
 
-Click **Run Workflow** to execute. Monitor progress in the Running Jobs panel.
+<p align="center">
+  <img src="Docs/Images/WorkflowLibrary.png" alt="Workflow Library" width="70%"/>
+  <br/>
+  <em>Imported workflows appear in the Workflow Library dropdown</em>
+</p>
+
+#### Step 4: Configure and Execute
+
+1. Select the imported workflow from the dropdown
+2. Configure input values using the input panel (choose between "From File" or "From Project" for assets)
+3. Click **Run [Workflow Name]** to execute
+4. Monitor progress in the Running Jobs panel
 
 ---
 
 ### Blueprint Usage
 
-#### Basic Execution
+For runtime workflow execution in Blueprints, use the **Execute Atlas Workflow** async node. This handles the complete execution flow including file uploads, polling, and result downloads.
 
-Use the **Execute Atlas Workflow** async node:
-
-```
-┌─────────────────────────────────────┐
-│  Execute Atlas Workflow             │
-├─────────────────────────────────────┤
-│  ► Workflow Asset                   │
-│  ► Inputs                           │
-├─────────────────────────────────────┤
-│  ○ On Success    → Result           │
-│  ○ On Failure    → Result           │
-│  ○ On Complete   → Result           │
-└─────────────────────────────────────┘
-```
-
-#### Setting Inputs
-
-```cpp
-// Create inputs structure
-FAtlasWorkflowInputs Inputs;
-Inputs.SetString("prompt", "A fantasy castle");
-Inputs.SetNumber("strength", 0.75f);
-Inputs.SetImage("reference", "/Game/Textures/MyRef.MyRef");
-```
-
-#### Using the Runtime Subsystem
-
-```cpp
-// Get the runtime subsystem
-UAtlasRuntimeSubsystem* Atlas = UAtlasRuntimeSubsystem::Get(this);
-
-// Create and execute a job
-UAtlasJob* Job = Atlas->CreateJob(WorkflowAsset, Inputs);
-Job->OnStateChanged.AddDynamic(this, &AMyActor::OnJobStateChanged);
-Job->Execute();
-```
+<p align="center">
+  <img src="Docs/Images/BP_ExecuteWorkflow.png" alt="Execute Atlas Workflow Node" width="60%"/>
+  <br/>
+  <em>Execute Atlas Workflow — Async node with success/failure callbacks</em>
+</p>
 
 ---
 
@@ -261,7 +260,7 @@ A **Workflow Asset** (`UAtlasWorkflowAsset`) is a native Unreal asset that defin
 - **Inputs** — Parameters required to execute the workflow
 - **Outputs** — Results produced by the workflow
 
-Create workflow assets via **Content Browser → Add → Atlas → Workflow Asset**.
+Workflow assets are created by importing JSON workflow definitions via the **Import** button in the Atlas Workflow editor window. The JSON schema is exported from the Atlas Platform.
 
 #### Job
 
@@ -322,58 +321,6 @@ Initializing → Uploading → Executing → Downloading → Done
 | `Set Bool` | Set a boolean input |
 | `Set Image` | Set an image from file path |
 | `Set Mesh` | Set a mesh from file path |
-
----
-
-### C++ API
-
-#### Include Headers
-
-```cpp
-#include "AtlasSDK/Public/AtlasRuntimeSubsystem.h"
-#include "AtlasSDK/Public/AtlasJob.h"
-#include "AtlasSDK/Public/AtlasJobManager.h"
-#include "AtlasSDK/Public/Types/AtlasWorkflowTypes.h"
-```
-
-#### Execute a Workflow
-
-```cpp
-void AMyActor::RunWorkflow()
-{
-    // Get subsystem
-    UAtlasRuntimeSubsystem* Atlas = UAtlasRuntimeSubsystem::Get(this);
-    if (!Atlas) return;
-    
-    // Build inputs
-    FAtlasWorkflowInputs Inputs;
-    Inputs.SetString(TEXT("prompt"), TEXT("A medieval sword"));
-    Inputs.SetNumber(TEXT("detail"), 0.8f);
-    
-    // Create job
-    UAtlasJob* Job = Atlas->CreateJob(MyWorkflowAsset, Inputs);
-    
-    // Bind callback
-    Job->OnStateChanged.AddDynamic(this, &AMyActor::HandleJobState);
-    
-    // Execute
-    Job->Execute();
-}
-
-void AMyActor::HandleJobState(UAtlasJob* Job, EAtlasJobState NewState)
-{
-    if (NewState == EAtlasJobState::Completed)
-    {
-        FAtlasWorkflowOutputs Outputs = Job->GetOutputs();
-        // Process outputs...
-    }
-    else if (NewState == EAtlasJobState::Failed)
-    {
-        FAtlasError Error = Job->GetError();
-        UE_LOG(LogTemp, Error, TEXT("Job failed: %s"), *Error.Message);
-    }
-}
-```
 
 ---
 
@@ -445,58 +392,6 @@ Access settings via **Edit → Editor Preferences → Plugins → Atlas SDK**
 |---------|---------|-------------|
 | **Max History Per Workflow** | 100 | Records kept per workflow (0 = unlimited) |
 | **Auto Save Output Files** | Enabled | Automatically save downloaded files |
-
----
-
-## 📁 Module Structure
-
-### Plugin Modules
-
-```
-AtlasWorkflow/
-├── AtlasHTTP          (Runtime)   — HTTP client, JSON handling
-├── AtlasSDK           (Runtime)   — Core SDK, jobs, history, types
-├── AtlasWorkflow      (Runtime)   — Main workflow module
-├── AtlasWorkflowEditor (Editor)   — Editor tools, asset factories
-└── AtlasWorkflowUI    (Editor)    — Editor UI components
-```
-
-### Source Layout
-
-```
-Source/
-├── AtlasHTTP/
-│   ├── Private/
-│   └── Public/
-│       ├── AtlasHttpRequest.h
-│       ├── AtlasHttpSubsystem.h
-│       ├── AtlasJsonObject.h
-│       └── AtlasJsonValue.h
-├── AtlasSDK/
-│   ├── Private/
-│   └── Public/
-│       ├── AtlasJob.h
-│       ├── AtlasJobManager.h
-│       ├── AtlasRuntimeSubsystem.h
-│       ├── AtlasAsyncActions.h
-│       └── Types/
-│           ├── AtlasWorkflowTypes.h
-│           ├── AtlasJobTypes.h
-│           └── AtlasValueTypes.h
-├── AtlasWorkflow/
-├── AtlasWorkflowEditor/
-└── AtlasWorkflowUI/
-```
-
-### Data Locations
-
-| Data | Location | Persistence |
-|------|----------|-------------|
-| **Workflow Assets** | `Content/` (project) | Permanent |
-| **Job History** | `Saved/Atlas/History/` | Permanent |
-| **Downloaded Outputs** | `Saved/Atlas/Output/` | Permanent |
-| **Upload Cache** | `Saved/Atlas/Cache/` | Cleared on cache expiry |
-| **Imported Assets** | Configurable (default: `/Game/Atlas/Imported/`) | Permanent |
 
 ---
 
