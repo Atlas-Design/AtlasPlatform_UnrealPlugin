@@ -37,7 +37,11 @@ public class AtlasWorkflowEditor : ModuleRules
                 "ImageWrapper",
                 "ImageCore",
                 "DesktopPlatform",
-                "ToolMenus"
+                "ToolMenus",
+                "LevelEditor",
+                "Blutility",
+                "UMG",
+                "UMGEditor"
             }
         );
     }

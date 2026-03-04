@@ -16,6 +16,12 @@ public:
     virtual void ShutdownModule() override;
 
 private:
+    /** Register menu extensions */
+    void RegisterMenus();
+    
+    /** Open the Atlas Workflow editor window */
+    void OpenAtlasWorkflowWindow();
+
     /** Registered asset type actions */
     TArray<TSharedPtr<IAssetTypeActions>> RegisteredAssetTypeActions;
 };
