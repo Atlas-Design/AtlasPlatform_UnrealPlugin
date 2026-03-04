@@ -8,6 +8,7 @@ Saved/
 
 # Documentation (internal only)
 *.md
+!README.md
 
 # IDE files
 .vs/
