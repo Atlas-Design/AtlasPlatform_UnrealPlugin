@@ -250,23 +250,57 @@ Once a workflow completes, the results appear in the **Job History** panel. This
 
 > ⚠️ **Important:** Don't manually copy output files! Use the **Import** buttons in Job History — they properly import assets to your Content Browser and keep them organized.
 
-#### Job History Panel
+#### Importing Images
 
-The Job History panel shows all completed workflow executions. For each job you can:
-
-| Button | Action |
-|--------|--------|
-| **Import** | Import the asset to your Content Browser at the configured path |
-| **Reveal** | Open the file location in your system file explorer |
-| **Preview** | View the generated image or mesh |
-
-Imported assets are saved to your configured import path (default: `/Game/Atlas/Imported/`) and **persist across editor restarts**.
+When a workflow generates images, you'll see them in the Job History with an **Import** button:
 
 <p align="center">
-  <img src="Docs/Images/JobHistory.png" alt="Job History Panel" width="80%"/>
+  <img src="Docs/Images/JobHistory_ImportImages.png" alt="Import Images Button" width="80%"/>
   <br/>
-  <em>Job History — Use Import buttons to properly bring assets into your project</em>
+  <em>Click Import to bring generated images into your Content Browser</em>
 </p>
+
+After importing, the images appear in your project and the UI updates to show they've been imported:
+
+<p align="center">
+  <img src="Docs/Images/JobHistory_ImportedImages.png" alt="Imported Images" width="80%"/>
+  <br/>
+  <em>Imported images — The UI shows they're now part of your project</em>
+</p>
+
+#### Importing Meshes
+
+The same workflow applies for 3D meshes (GLB/FBX):
+
+<p align="center">
+  <img src="Docs/Images/JobHistory_ImportMeshespng.png" alt="Import Meshes Button" width="80%"/>
+  <br/>
+  <em>Click Import to bring generated meshes into your Content Browser</em>
+</p>
+
+<p align="center">
+  <img src="Docs/Images/JobHistory_ImportedMehses.png" alt="Imported Meshes" width="80%"/>
+  <br/>
+  <em>Imported meshes — Ready to use in your scene</em>
+</p>
+
+#### Where Assets Are Stored
+
+By default, all imported assets are saved to:
+
+```
+Content/Atlas/Imported/{WorkflowName}/
+```
+
+Each workflow gets its own subfolder to keep assets organized:
+
+<p align="center">
+  <img src="Docs/Images/JobHistory_ImportedDefaultFolders.png" alt="Default Import Folders" width="60%"/>
+  <br/>
+  <em>Assets are organized by workflow name in Content/Atlas/Imported/</em>
+</p>
+
+> **Note:** Keep imported assets in this location. The plugin uses this folder to detect which outputs have already been imported, preventing duplicates and allowing you to track import status across editor sessions.
 
 ---
 
