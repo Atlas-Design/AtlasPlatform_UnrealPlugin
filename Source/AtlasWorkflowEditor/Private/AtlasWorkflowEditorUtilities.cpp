@@ -9,7 +9,7 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Misc/PackageName.h"
 #include "Misc/Base64.h"
-#include "AtlasWorkflowEditorSettings.h"
+#include "AtlasSDKSettings.h"
 
 // Image utils / core
 #include "ImageUtils.h"    // FImageUtils, GetTexture2DSourceImage, GetRenderTargetImage, SaveImageByExtension
@@ -255,7 +255,7 @@ UTexture2D* UAtlasWorkflowEditorUtilities::CreateTextureFromBytes(
         UncompressedBGRA.GetData()
     );
 
-    // Basic settings – tweak to taste
+    // Basic settings â€“ tweak to taste
     NewTexture->CompressionSettings = TC_Default;
     NewTexture->SRGB = true;
     NewTexture->LODGroup = TEXTUREGROUP_World;
@@ -272,14 +272,14 @@ UTexture2D* UAtlasWorkflowEditorUtilities::CreateTextureFromBytes(
 
 UTexture2D* UAtlasWorkflowEditorUtilities::CreateTextureFromBytesWithDefaults(const TArray<uint8>& ImageBytes, const FString& AssetName, FString& OutError)
 {
-    const UAtlasWorkflowEditorSettings* Settings = GetDefault<UAtlasWorkflowEditorSettings>();
+    const UAtlasSDKSettings* Settings = UAtlasSDKSettings::Get();
     if (!Settings)
     {
-        OutError = TEXT("Could not load Atlas Workflow Editor settings.");
+        OutError = TEXT("Could not load Atlas SDK settings.");
         return nullptr;
     }
 
-    return CreateTextureFromBytes(ImageBytes, Settings->DefaultTextureImportPath, AssetName, OutError);
+    return CreateTextureFromBytes(ImageBytes, Settings->GetDefaultImportPathString(), AssetName, OutError);
 }
 
 UTexture2D* UAtlasWorkflowEditorUtilities::CreateTextureFromBase64(const FString& Base64Data, const FString& PackagePath, const FString& AssetName, FString& OutError)

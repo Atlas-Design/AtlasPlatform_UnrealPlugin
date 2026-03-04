@@ -39,6 +39,22 @@ public:
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Output")
 	bool bAutoOrganizeByType;
 
+	/**
+	 * Folder for temporary exports (e.g., when uploading assets to the server).
+	 * Relative paths are resolved from the project directory.
+	 * Default: {Project}/Saved/Atlas/TempExports/
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Output")
+	FString TempExportPath;
+
+	/**
+	 * Folder for temporary imports (e.g., downloaded files before processing).
+	 * Relative paths are resolved from the project directory.
+	 * Default: {Project}/Saved/Atlas/TempImports/
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Output")
+	FString TempImportPath;
+
 	// ==================== Import Settings ====================
 
 	/**
@@ -144,9 +160,27 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Atlas|Settings")
 	FString GetDefaultImportPathString() const;
 
+	/** Get the resolved temp export folder path (absolute) */
+	UFUNCTION(BlueprintPure, Category = "Atlas|Settings")
+	FString GetTempExportFolderPath() const;
+
+	/** Get the resolved temp import folder path (absolute) */
+	UFUNCTION(BlueprintPure, Category = "Atlas|Settings")
+	FString GetTempImportFolderPath() const;
+
 	/** Get the singleton settings instance */
 	UFUNCTION(BlueprintPure, Category = "Atlas|Settings", meta = (DisplayName = "Get Atlas SDK Settings"))
 	static const UAtlasSDKSettings* Get();
+
+	// ==================== Static Helpers (for backwards compatibility) ====================
+
+	/** Get the absolute path for the default temp export folder */
+	UFUNCTION(BlueprintPure, Category = "Atlas|Paths")
+	static FString GetAtlasDefaultExportFolder();
+
+	/** Get the absolute path for the default temp import folder */
+	UFUNCTION(BlueprintPure, Category = "Atlas|Paths")
+	static FString GetAtlasDefaultImportFolder();
 
 	// UDeveloperSettings interface
 	virtual FName GetCategoryName() const override { return FName("Plugins"); }

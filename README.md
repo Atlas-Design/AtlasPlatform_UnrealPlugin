@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Unreal%20Engine-5.3+-black?logo=unrealengine" alt="Unreal Engine 5.3+"/>
+  <img src="https://img.shields.io/badge/Unreal%20Engine-5.5+-black?logo=unrealengine" alt="Unreal Engine 5.5+"/>
   <img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="MIT License"/>
   <img src="https://img.shields.io/badge/Version-1.0.0-green" alt="Version 1.0.0"/>
   <img src="https://img.shields.io/badge/Status-Early%20Access-orange" alt="Status"/>
@@ -122,9 +122,9 @@ Whether you're generating textures, creating 3D models, or running complex multi
 </p>
 
 <p align="center">
-  <img src="Docs/Images/Settings.png" alt="Project Settings" width="80%"/>
+  <img src="Docs/Images/Settings.png" alt="Editor Preferences" width="80%"/>
   <br/>
-  <em>Project Settings — Configure output paths, timeouts, and caching</em>
+  <em>Editor Preferences — Configure output paths, timeouts, and caching</em>
 </p>
 
 ---
@@ -133,7 +133,7 @@ Whether you're generating textures, creating 3D models, or running complex multi
 
 | Requirement | Version |
 |-------------|---------|
-| **Unreal Engine** | 5.3 or newer |
+| **Unreal Engine** | 5.5 or newer |
 | **Platform** | Windows (macOS/Linux untested) |
 | **C++ Standard** | C++17 |
 
@@ -174,7 +174,7 @@ git clone https://github.com/Atlas-Design/AtlasPlatform_UnrealPlugin.git AtlasWo
 
 After installation, you should see:
 - **Window → Atlas Workflow** menu item
-- **Edit → Project Settings → Plugins → Atlas SDK** settings section
+- **Edit → Editor Preferences → Plugins → Atlas SDK** settings section
 - **AtlasWorkflow Content** folder in Content Browser
 
 ---
@@ -189,7 +189,7 @@ Navigate to **Window → Atlas Workflow** to open the main editor window.
 
 #### Step 2: Configure Settings
 
-Go to **Edit → Project Settings → Plugins → Atlas SDK** and configure:
+Go to **Edit → Editor Preferences → Plugins → Atlas SDK** and configure:
 
 - **Output Folder** — Where downloaded files are saved
 - **Default Import Path** — Content Browser location for imported assets
@@ -197,8 +197,8 @@ Go to **Edit → Project Settings → Plugins → Atlas SDK** and configure:
 
 #### Step 3: Load a Workflow
 
-1. In Content Browser, find or import a Workflow Asset (`.uasset`)
-2. Double-click to open in the Atlas Workflow editor window
+1. Open the Atlas Workflow window via **Window → Atlas → Atlas Workflow**
+2. In the workflow panel, select a Workflow Asset from your Content Browser
 3. Configure input values using the input panel
 
 #### Step 4: Execute
@@ -407,7 +407,7 @@ void AMyActor::HandleJobState(UAtlasJob* Job, EAtlasJobState NewState)
 
 ## ⚙️ Configuration
 
-Access settings via **Edit → Project Settings → Plugins → Atlas SDK**
+Access settings via **Edit → Editor Preferences → Plugins → Atlas SDK**
 
 ### Output Settings
 
@@ -513,7 +513,7 @@ Source/
 
 **Solutions:**
 1. Check your internet connection
-2. Increase **Max Execution Time** in Project Settings
+2. Increase **Max Execution Time** in Editor Preferences
 3. Check Atlas Platform status
 
 #### "Failed to upload input file"

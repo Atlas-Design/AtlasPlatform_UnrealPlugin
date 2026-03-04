@@ -10,6 +10,10 @@ UAtlasSDKSettings::UAtlasSDKSettings()
 	
 	// Auto-organize by type is enabled by default
 	bAutoOrganizeByType = true;
+
+	// Default temp folders for export/import operations
+	TempExportPath = TEXT("Saved/Atlas/TempExports");
+	TempImportPath = TEXT("Saved/Atlas/TempImports");
 	
 	// Default import path in Content Browser
 	DefaultImportPath.Path = TEXT("/Game/Atlas/Imported");
@@ -70,7 +74,35 @@ FString UAtlasSDKSettings::GetDefaultImportPathString() const
 	return DefaultImportPath.Path;
 }
 
+FString UAtlasSDKSettings::GetTempExportFolderPath() const
+{
+	const FString RelativePath = !TempExportPath.IsEmpty() 
+		? TempExportPath 
+		: TEXT("Saved/Atlas/TempExports");
+	return FPaths::Combine(FPaths::ProjectDir(), RelativePath);
+}
+
+FString UAtlasSDKSettings::GetTempImportFolderPath() const
+{
+	const FString RelativePath = !TempImportPath.IsEmpty() 
+		? TempImportPath 
+		: TEXT("Saved/Atlas/TempImports");
+	return FPaths::Combine(FPaths::ProjectDir(), RelativePath);
+}
+
 const UAtlasSDKSettings* UAtlasSDKSettings::Get()
 {
 	return GetDefault<UAtlasSDKSettings>();
+}
+
+FString UAtlasSDKSettings::GetAtlasDefaultExportFolder()
+{
+	const UAtlasSDKSettings* Settings = Get();
+	return Settings ? Settings->GetTempExportFolderPath() : FPaths::Combine(FPaths::ProjectDir(), TEXT("Saved/Atlas/TempExports"));
+}
+
+FString UAtlasSDKSettings::GetAtlasDefaultImportFolder()
+{
+	const UAtlasSDKSettings* Settings = Get();
+	return Settings ? Settings->GetTempImportFolderPath() : FPaths::Combine(FPaths::ProjectDir(), TEXT("Saved/Atlas/TempImports"));
 }
