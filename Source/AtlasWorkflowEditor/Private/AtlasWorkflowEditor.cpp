@@ -51,7 +51,7 @@ void FAtlasWorkflowEditorModule::RegisterMenus()
 void FAtlasWorkflowEditorModule::OpenAtlasWorkflowWindow()
 {
     // Path to the Editor Utility Widget Blueprint
-    const FSoftObjectPath WidgetPath(TEXT("/AtlasWorkflow/EUW_AtlasMain.EUW_AtlasMain"));
+    const FSoftObjectPath WidgetPath(TEXT("/AtlasWorkflow/Core/UI/Editor/EUW_AtlasMain.EUW_AtlasMain"));
     
     UObject* LoadedObject = WidgetPath.TryLoad();
     if (UEditorUtilityWidgetBlueprint* WidgetBlueprint = Cast<UEditorUtilityWidgetBlueprint>(LoadedObject))
