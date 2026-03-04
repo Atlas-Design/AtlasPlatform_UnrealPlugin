@@ -247,6 +247,32 @@ For runtime workflow execution in Blueprints, use the **Execute Atlas Workflow**
   <em>Execute Atlas Workflow — Async node with success/failure callbacks</em>
 </p>
 
+#### Setting Inputs
+
+Use the input setter functions to configure workflow parameters before execution:
+
+<p align="center">
+  <img src="Docs/Images/BP_WorkflowInputs.png" alt="Setting Workflow Inputs" width="70%"/>
+  <br/>
+  <em>Setting workflow inputs — Use type-specific setters for each parameter</em>
+</p>
+
+#### Handling Outputs
+
+Access the results from the execution result structure:
+
+<p align="center">
+  <img src="Docs/Images/BP_Outputs1.png" alt="Handling Outputs" width="70%"/>
+  <br/>
+  <em>Accessing workflow outputs from the result</em>
+</p>
+
+<p align="center">
+  <img src="Docs/Images/BP_OutputFile.png" alt="File Output Handling" width="70%"/>
+  <br/>
+  <em>Handling file outputs — Save or process generated assets</em>
+</p>
+
 ---
 
 ## 📖 Documentation
