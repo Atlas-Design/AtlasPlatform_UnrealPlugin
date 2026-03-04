@@ -39,6 +39,8 @@
 - [Requirements](#-requirements)
 - [Installation](#-installation)
 - [Quick Start](#-quick-start)
+  - [Working with Outputs](#working-with-outputs)
+  - [Blueprint Usage](#blueprint-usage)
 - [Documentation](#-documentation)
   - [Core Concepts](#core-concepts)
   - [Blueprint API](#blueprint-api)
@@ -159,7 +161,7 @@ Whether you're generating textures, creating 3D models, or running complex multi
 
 ## 🚀 Installation
 
-### Option A: Clone from GitHub (Recommended)
+### Clone or Download from GitHub
 
 1. Navigate to your project's `Plugins/` folder (create it if it doesn't exist)
 2. Clone the repository:
@@ -169,14 +171,12 @@ cd YourProject/Plugins
 git clone https://github.com/Atlas-Design/AtlasPlatform_UnrealPlugin.git AtlasWorkflow
 ```
 
-3. Regenerate project files (right-click `.uproject` → Generate Visual Studio Project Files)
-4. Open your project — the plugin will compile automatically
+Or download and extract the repository ZIP to `YourProject/Plugins/AtlasWorkflow/`
 
-### Option B: Download ZIP
+3. **Open your project in Unreal Editor**
+4. **Wait for compilation** — The first launch will compile the plugin's C++ code. This may take **several minutes**. You'll see compilation progress in the bottom-right corner of the editor.
 
-1. Download the latest release from [GitHub Releases](https://github.com/Atlas-Design/AtlasPlatform_UnrealPlugin/releases)
-2. Extract to `YourProject/Plugins/AtlasWorkflow/`
-3. Regenerate project files and open your project
+> **Note:** The compilation only happens once. Subsequent launches will be fast.
 
 ### Verifying Installation
 
@@ -234,6 +234,39 @@ Go to **Edit → Editor Preferences → Plugins → Atlas SDK** and configure:
 2. Configure input values using the input panel (choose between "From File" or "From Project" for assets)
 3. Click **Run [Workflow Name]** to execute
 4. Monitor progress in the Running Jobs panel
+
+---
+
+### Working with Outputs
+
+Once a workflow completes, the results appear in the **Job History** panel. This is where you manage and import your generated assets.
+
+#### The Recommended Workflow
+
+1. **Run your workflow** from the Current Workflow panel
+2. **Monitor progress** in the Running Jobs panel  
+3. **View completed jobs** in the Job History panel
+4. **Use the Import buttons** to bring assets into your project
+
+> ⚠️ **Important:** Don't manually copy output files! Use the **Import** buttons in Job History — they properly import assets to your Content Browser and keep them organized.
+
+#### Job History Panel
+
+The Job History panel shows all completed workflow executions. For each job you can:
+
+| Button | Action |
+|--------|--------|
+| **Import** | Import the asset to your Content Browser at the configured path |
+| **Reveal** | Open the file location in your system file explorer |
+| **Preview** | View the generated image or mesh |
+
+Imported assets are saved to your configured import path (default: `/Game/Atlas/Imported/`) and **persist across editor restarts**.
+
+<p align="center">
+  <img src="Docs/Images/JobHistory.png" alt="Job History Panel" width="80%"/>
+  <br/>
+  <em>Job History — Use Import buttons to properly bring assets into your project</em>
+</p>
 
 ---
 
