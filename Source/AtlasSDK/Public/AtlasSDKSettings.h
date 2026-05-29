@@ -71,6 +71,30 @@ public:
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Import|Textures")
 	bool bCompressImportedTextures;
 
+	// ==================== Authentication ====================
+
+	/**
+	 * Workspace API key for Atlas Platform v0.2+ (atk_...).
+	 * Create in Atlas → Workspace settings → API Keys.
+	 */
+	UPROPERTY(Config, EditAnywhere, Category = "Authentication", meta = (PasswordField = true))
+	FString WorkspaceApiKey;
+
+	/**
+	 * When enabled and WorkspaceApiKey is empty, read ATLAS_API_KEY from the process environment.
+	 * Useful for automation and packaged builds without storing the key in editor settings.
+	 */
+	UPROPERTY(Config, EditAnywhere, Category = "Authentication")
+	bool bReadApiKeyFromEnvironment;
+
+	/** Resolved API key (settings first, then environment when allowed). */
+	UFUNCTION(BlueprintPure, Category = "Atlas|Settings|Authentication")
+	FString GetResolvedWorkspaceApiKey() const;
+
+	/** Whether a workspace API key is configured. */
+	UFUNCTION(BlueprintPure, Category = "Atlas|Settings|Authentication")
+	bool HasWorkspaceApiKey() const;
+
 	// ==================== Execution Settings ====================
 
 	/**
@@ -213,6 +237,9 @@ public:
 	virtual FName GetCategoryName() const override { return FName("Plugins"); }
 #if WITH_EDITOR
 	virtual FText GetSectionText() const override { return FText::FromString("Atlas SDK"); }
-	virtual FText GetSectionDescription() const override { return FText::FromString("Configure Atlas SDK output folders and import settings"); }
+	virtual FText GetSectionDescription() const override
+	{
+		return FText::FromString("Configure Atlas SDK authentication, output folders, and import settings");
+	}
 #endif
 };

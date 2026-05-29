@@ -241,6 +241,65 @@ struct ATLASSDK_API FAtlasWorkflowSchema
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Atlas|Schema")
 	FString BaseUrl;
 
+	// ==================== API Version Helpers (C++) ====================
+
+	/**
+	 * Parse "major.minor" API version strings from exported workflow JSON.
+	 * @return False when Version is empty or not parseable (treated as legacy v0.1 file API).
+	 */
+	static bool TryParseApiVersionString(const FString& VersionString, int32& OutMajor, int32& OutMinor)
+	{
+		OutMajor = 0;
+		OutMinor = 0;
+
+		FString Trimmed = VersionString;
+		Trimmed.TrimStartAndEndInline();
+		if (Trimmed.IsEmpty())
+		{
+			return false;
+		}
+
+		FString MajorStr;
+		FString MinorStr;
+		if (!Trimmed.Split(TEXT("."), &MajorStr, &MinorStr, ESearchCase::IgnoreCase, ESearchDir::FromStart))
+		{
+			if (Trimmed.IsNumeric())
+			{
+				OutMajor = FCString::Atoi(*Trimmed);
+				OutMinor = 0;
+				return true;
+			}
+			return false;
+		}
+
+		MajorStr.TrimStartAndEndInline();
+		MinorStr.TrimStartAndEndInline();
+		if (!MajorStr.IsNumeric())
+		{
+			return false;
+		}
+
+		OutMajor = FCString::Atoi(*MajorStr);
+		OutMinor = MinorStr.IsNumeric() ? FCString::Atoi(*MinorStr) : 0;
+		return true;
+	}
+
+	/**
+	 * v0.2+ uses workspace-scoped upload/download paths (no api_id in URL).
+	 * Legacy v0.1 embeds api_id in upload and download URLs.
+	 */
+	bool UsesWorkspaceScopedFileApi() const
+	{
+		int32 Major = 0;
+		int32 Minor = 0;
+		if (!TryParseApiVersionString(Version, Major, Minor))
+		{
+			return false;
+		}
+
+		return Major > 0 || (Major == 0 && Minor >= 2);
+	}
+
 	// ==================== URL Builder Methods (C++) ====================
 
 	/** Get the base URL with trailing slash removed */
@@ -256,10 +315,16 @@ struct ATLASSDK_API FAtlasWorkflowSchema
 
 	/**
 	 * Build the upload URL for this workflow.
-	 * Pattern: {BaseUrl}/{Version}/upload/{ApiId}
+	 * v0.1: {BaseUrl}/{Version}/upload/{ApiId}
+	 * v0.2+: {BaseUrl}/{Version}/upload
 	 */
 	FString GetUploadUrl() const
 	{
+		if (UsesWorkspaceScopedFileApi())
+		{
+			return FString::Printf(TEXT("%s/%s/upload"), *GetCleanBaseUrl(), *Version);
+		}
+
 		return FString::Printf(TEXT("%s/%s/upload/%s"), *GetCleanBaseUrl(), *Version, *ApiId);
 	}
 
@@ -283,10 +348,16 @@ struct ATLASSDK_API FAtlasWorkflowSchema
 
 	/**
 	 * Build a download URL for a specific file result.
-	 * Pattern: {BaseUrl}/{Version}/download_binary_result/{ApiId}/{FileId}
+	 * v0.1: {BaseUrl}/{Version}/download_binary_result/{ApiId}/{FileId}
+	 * v0.2+: {BaseUrl}/{Version}/download_binary_result/{FileId}
 	 */
 	FString GetDownloadUrl(const FString& FileId) const
 	{
+		if (UsesWorkspaceScopedFileApi())
+		{
+			return FString::Printf(TEXT("%s/%s/download_binary_result/%s"), *GetCleanBaseUrl(), *Version, *FileId);
+		}
+
 		return FString::Printf(TEXT("%s/%s/download_binary_result/%s/%s"), *GetCleanBaseUrl(), *Version, *ApiId, *FileId);
 	}
 

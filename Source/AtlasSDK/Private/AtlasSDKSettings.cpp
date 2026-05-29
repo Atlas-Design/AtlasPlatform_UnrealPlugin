@@ -1,7 +1,9 @@
 // Copyright Atlas Platform. All Rights Reserved.
 
 #include "AtlasSDKSettings.h"
+#include "AtlasPlatformAuth.h"
 #include "Misc/Paths.h"
+#include "GenericPlatform/GenericPlatformMisc.h"
 
 UAtlasSDKSettings::UAtlasSDKSettings()
 {
@@ -20,6 +22,10 @@ UAtlasSDKSettings::UAtlasSDKSettings()
 	
 	// Don't compress by default (let Unreal use its defaults)
 	bCompressImportedTextures = false;
+
+	// Authentication (v0.2+)
+	WorkspaceApiKey.Empty();
+	bReadApiKeyFromEnvironment = true;
 
 	// Execution settings
 	RequestTimeoutSeconds = 120.0f;      // 2 minutes per HTTP request
@@ -98,6 +104,30 @@ FString UAtlasSDKSettings::GetTempImportFolderPath() const
 const UAtlasSDKSettings* UAtlasSDKSettings::Get()
 {
 	return GetDefault<UAtlasSDKSettings>();
+}
+
+FString UAtlasSDKSettings::GetResolvedWorkspaceApiKey() const
+{
+	FString Key = WorkspaceApiKey;
+	Key.TrimStartAndEndInline();
+	if (!Key.IsEmpty())
+	{
+		return Key;
+	}
+
+	if (bReadApiKeyFromEnvironment)
+	{
+		FString EnvKey = FPlatformMisc::GetEnvironmentVariable(*FAtlasPlatformAuth::ApiKeyEnvironmentVariableName);
+		EnvKey.TrimStartAndEndInline();
+		return EnvKey;
+	}
+
+	return FString();
+}
+
+bool UAtlasSDKSettings::HasWorkspaceApiKey() const
+{
+	return !GetResolvedWorkspaceApiKey().IsEmpty();
 }
 
 FString UAtlasSDKSettings::GetAtlasDefaultExportFolder()

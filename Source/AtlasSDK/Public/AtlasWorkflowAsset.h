@@ -120,9 +120,15 @@ public:
 	// ==================== URL Builders ====================
 
 	/**
+	 * True for API v0.2+ (workspace-scoped upload/download URLs without api_id in path).
+	 */
+	UFUNCTION(BlueprintPure, Category = "Atlas|Workflow|URLs")
+	bool UsesWorkspaceScopedFileApi() const;
+
+	/**
 	 * Get the upload URL for this workflow.
-	 * Pattern: {BaseUrl}/{Version}/upload/{ApiId}
-	 * @return The complete upload URL
+	 * v0.1: {BaseUrl}/{Version}/upload/{ApiId}
+	 * v0.2+: {BaseUrl}/{Version}/upload
 	 */
 	UFUNCTION(BlueprintPure, Category = "Atlas|Workflow|URLs")
 	FString GetUploadUrl() const;
@@ -130,7 +136,6 @@ public:
 	/**
 	 * Get the async execute URL for this workflow.
 	 * Pattern: {BaseUrl}/{Version}/api_execute_async/{ApiId}
-	 * @return The complete execute URL
 	 */
 	UFUNCTION(BlueprintPure, Category = "Atlas|Workflow|URLs")
 	FString GetExecuteUrl() const;
@@ -138,17 +143,14 @@ public:
 	/**
 	 * Get the status polling URL for an execution.
 	 * Pattern: {BaseUrl}/{Version}/api_status/{ExecutionId}
-	 * @param ExecutionId The execution ID returned from execute call
-	 * @return The complete status URL
 	 */
 	UFUNCTION(BlueprintPure, Category = "Atlas|Workflow|URLs")
 	FString GetStatusUrl(const FString& ExecutionId) const;
 
 	/**
 	 * Get the download URL for a specific file result.
-	 * Pattern: {BaseUrl}/{Version}/download_binary_result/{ApiId}/{FileId}
-	 * @param FileId The file ID to download
-	 * @return The complete download URL
+	 * v0.1: {BaseUrl}/{Version}/download_binary_result/{ApiId}/{FileId}
+	 * v0.2+: {BaseUrl}/{Version}/download_binary_result/{FileId}
 	 */
 	UFUNCTION(BlueprintPure, Category = "Atlas|Workflow|URLs")
 	FString GetDownloadUrl(const FString& FileId) const;

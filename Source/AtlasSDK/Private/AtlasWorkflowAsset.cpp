@@ -342,6 +342,11 @@ FString UAtlasWorkflowAsset::GetDescription() const
 
 // ==================== URL Builders ====================
 
+bool UAtlasWorkflowAsset::UsesWorkspaceScopedFileApi() const
+{
+	return Schema.UsesWorkspaceScopedFileApi();
+}
+
 FString UAtlasWorkflowAsset::GetUploadUrl() const
 {
 	return Schema.GetUploadUrl();
