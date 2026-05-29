@@ -29,6 +29,16 @@
 > 
 > This plugin is currently in **early development**. Some features may be incomplete, and you may encounter bugs. We appreciate your patience and welcome feedback via [GitHub Issues](https://github.com/Atlas-Design/AtlasPlatform_UnrealPlugin/issues).
 
+> 🔧 **C++ project required**
+> 
+> The GitHub repo ships **plugin source only** (no prebuilt binaries). Your Unreal project must be **C++-enabled** so the plugin can be compiled once before use.
+> 
+> **Blueprint-only projects cannot compile this plugin from the editor.** If you open the project and click **Yes** on the *Missing AtlasWorkflow Modules* dialog, you may see *Engine modules are out of date… build through your IDE*.
+> 
+> Use an existing **C++ project**, or convert once: **Tools → New C++ Class** → close the editor → generate Visual Studio project files → build **Development Editor** → reopen the project.
+> 
+> **Windows build tools:** [Visual Studio 2022](https://visualstudio.microsoft.com/) with the **Game development with C++** workload.
+
 ---
 
 ## 📋 Table of Contents
@@ -125,10 +135,12 @@ Whether you're generating textures, creating 3D models, or running complex multi
 
 ## 📦 Requirements
 
-| Requirement | Version |
-|-------------|---------|
+| Requirement | Version / notes |
+|-------------|-----------------|
 | **Unreal Engine** | 5.5 or newer |
 | **Platform** | Windows (macOS/Linux untested) |
+| **Project type** | **C++ project** (or converted once from Blueprint — see [Installation](#-installation)) |
+| **Build tools (Windows)** | Visual Studio 2022 with **Game development with C++** workload |
 
 ### Plugin Dependencies (Auto-enabled)
 
@@ -144,6 +156,8 @@ Whether you're generating textures, creating 3D models, or running complex multi
 
 ## 🚀 Installation
 
+The repository does **not** include compiled `Binaries/`. The first install requires a **one-time C++ build** of the plugin inside your project.
+
 ### Clone or Download from GitHub
 
 1. Navigate to your project's `Plugins/` folder (create it if it doesn't exist)
@@ -156,10 +170,32 @@ git clone https://github.com/Atlas-Design/AtlasPlatform_UnrealPlugin.git AtlasWo
 
 Or download and extract the repository ZIP to `YourProject/Plugins/AtlasWorkflow/`
 
-3. **Open your project in Unreal Editor**
-4. **Wait for compilation** — The first launch will compile the plugin's C++ code. This may take **several minutes**. You'll see compilation progress in the bottom-right corner of the editor.
+### Build the plugin (required once)
 
-> **Note:** The compilation only happens once. Subsequent launches will be fast.
+**If your project is already C++:**
+
+1. Right-click your `.uproject` → **Generate Visual Studio project files**
+2. Open the `.sln` in Visual Studio 2022
+3. Set configuration to **Development Editor** and build
+4. Open the project in Unreal Editor
+
+**If your project is Blueprint-only:**
+
+1. Open the project in the editor
+2. **Tools → New C++ Class** → choose any parent (e.g. *Actor*) → create (this adds a `Source/` folder and `.sln`)
+3. Close the editor
+4. Right-click the `.uproject` → **Generate Visual Studio project files**
+5. Open the `.sln` and build **Development Editor**
+6. Reopen the project in Unreal Editor
+
+**If you see *Missing AtlasWorkflow Modules*:**
+
+- Click **Yes** only if you have already completed the build steps above (C++ project with a successful IDE build)
+- If you are on a Blueprint-only project and get *build through your IDE*, click **No**, follow the Blueprint-only steps above, then reopen the editor
+
+The first build may take **several minutes**. Later editor launches are fast.
+
+> **Note:** Prebuilt binary releases (for Blueprint-only projects without compiling) may be offered in future GitHub Releases. The default clone/ZIP install always requires building from source.
 
 ### Verifying Installation
 
@@ -456,6 +492,16 @@ Keys are sent as `Authorization: Bearer <key>` on upload, execute, status, and d
 
 ### Common Issues
 
+#### Missing AtlasWorkflow Modules (build through your IDE)
+
+**Cause:** The plugin is C++ source without prebuilt binaries. Blueprint-only projects have no Visual Studio solution to compile against.
+
+**Solutions:**
+1. Confirm the plugin is at `YourProject/Plugins/AtlasWorkflow/`
+2. If the project has no `Source/` folder, add a C++ class once (**Tools → New C++ Class**)
+3. Close the editor, generate project files from the `.uproject`, build **Development Editor** in Visual Studio 2022
+4. Reopen the project — do not rely on in-editor compile for the first install on Blueprint-only projects
+
 #### "Configure a workspace API key" / HTTP 401 or 403
 
 **Possible causes:**
@@ -495,12 +541,12 @@ Keys are sent as `Authorization: Bearer <key>` on upload, execute, status, and d
 #### "Plugin not appearing in menus"
 
 **Possible causes:**
-- Plugin not compiled
+- Plugin not compiled (see [Missing AtlasWorkflow Modules](#missing-atlasworkflow-modules-build-through-your-ide) above)
 - Missing dependencies
 
 **Solutions:**
-1. Regenerate project files
-2. Rebuild project from IDE
+1. Complete the [Build the plugin](#build-the-plugin-required-once) steps
+2. Regenerate project files and rebuild **Development Editor** from Visual Studio
 3. Check Output Log for compilation errors
 
 #### "Jobs not persisting after restart"
