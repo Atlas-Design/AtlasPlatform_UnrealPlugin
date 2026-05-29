@@ -11,7 +11,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Unreal%20Engine-5.5+-black?logo=unrealengine" alt="Unreal Engine 5.5+"/>
   <img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="MIT License"/>
-  <img src="https://img.shields.io/badge/Version-1.0.0-green" alt="Version 1.0.0"/>
+  <img src="https://img.shields.io/badge/Version-1.1.0-green" alt="Version 1.1.0"/>
   <img src="https://img.shields.io/badge/Status-Early%20Access-orange" alt="Status"/>
 </p>
 
@@ -47,6 +47,7 @@
   - [Input Types](#input-types)
   - [Output Types](#output-types)
 - [Configuration](#-configuration)
+  - [Authentication](#authentication)
 - [Troubleshooting](#-troubleshooting)
 - [License](#-license)
 
@@ -64,7 +65,8 @@ Whether you're generating textures, creating 3D models, or running complex multi
 - **Full Blueprint Support** — Async nodes, type-safe inputs, and easy integration
 - **Runtime Ready** — Works in packaged builds, not just editor
 - **Asset Pipeline Support** — Automatic import of textures (PNG) and meshes (GLB/FBX)
-- **Full Job History** — Track, inspect, and replay any previous workflow execution
+- **Per-run archives** — Each execution saves inputs, outputs, and metadata under your configured output folder
+- **Atlas Platform API v0.2** — Workspace API key auth, multipart upload, and version-aware file URLs
 
 ---
 
@@ -87,11 +89,10 @@ Whether you're generating textures, creating 3D models, or running complex multi
 - ⏱️ **Configurable Timeouts** — Set execution limits up to 60 minutes
 - 🔔 **State Callbacks** — Respond to job state changes in Blueprint
 
-### Job History & Results
-- 📜 **Complete History** — Browse all past workflow executions
-- 🔍 **Full Inspection** — View exact inputs and outputs for any historical job
-- 💾 **Persistent Storage** — Job history survives editor restarts
-- 📥 **Asset Import** — Import generated assets directly into Content Browser
+### Results & Archives
+- 📁 **Per-run folders** — `{OutputFolder}/{WorkflowName}/{RunId}/` with `job.json`, `inputs/`, and `outputs/`
+- 💾 **Persistent on disk** — Downloaded files and run metadata survive editor restarts
+- 📥 **Content Browser import** — Bring generated textures and meshes into your project from the Workflow Editor
 
 ### Runtime Support
 - 🎮 **Packaged Builds** — Execute workflows in shipping games
@@ -115,27 +116,9 @@ Whether you're generating textures, creating 3D models, or running complex multi
 </p>
 
 <p align="center">
-  <img src="Docs/Images/JobHistory.png" alt="Job History" width="80%"/>
-  <br/>
-  <em>Job History — Browse, filter, and inspect past workflow executions</em>
-</p>
-
-<p align="center">
-  <img src="Docs/Images/RunningJobs.png" alt="Running Jobs" width="80%"/>
-  <br/>
-  <em>Running Jobs Panel — Monitor active workflow executions</em>
-</p>
-
-<p align="center">
-  <img src="Docs/Images/JobCompleted.png" alt="Job Completed" width="80%"/>
-  <br/>
-  <em>Completed Job — View and download generated outputs</em>
-</p>
-
-<p align="center">
   <img src="Docs/Images/Settings.png" alt="Editor Preferences" width="80%"/>
   <br/>
-  <em>Editor Preferences — Configure output paths, timeouts, and caching</em>
+  <em>Editor Preferences — API key, output paths, timeouts, and caching (refresh screenshot after enabling Authentication)</em>
 </p>
 
 ---
@@ -155,7 +138,7 @@ Whether you're generating textures, creating 3D models, or running complex multi
 | **Interchange** | Mesh import (GLB/FBX) |
 | **InterchangeEditor** | Editor mesh import tools |
 
-> **Note:** An active Atlas Platform backend connection is required for workflow execution.
+> **Note:** An active Atlas Platform backend connection and a **workspace API key** are required for workflow execution. Import workflow JSON exported for **API v0.2** from the Atlas Platform.
 
 ---
 
@@ -181,8 +164,9 @@ Or download and extract the repository ZIP to `YourProject/Plugins/AtlasWorkflow
 ### Verifying Installation
 
 After installation, you should see:
-- **Window → Atlas → Atlas Workflow** menu item
-- **Edit → Editor Preferences → Plugins → Atlas SDK** settings section
+- **Atlas** toolbar menu (play toolbar) with **Workflow Editor**
+- **Window → Atlas → Workflow Editor**
+- **Edit → Editor Preferences → Plugins → Atlas SDK** (including **Authentication**)
 - **AtlasWorkflow Content** folder in Content Browser
 
 <p align="center">
@@ -197,21 +181,30 @@ After installation, you should see:
 
 ### Editor Usage
 
-#### Step 1: Open the Editor Window
+#### Step 1: Configure your API key
 
-Navigate to **Window → Atlas Workflow** to open the main editor window.
+Go to **Edit → Editor Preferences → Plugins → Atlas SDK → Authentication** and set:
 
-#### Step 2: Configure Settings
+- **Workspace Api Key** — Your Atlas workspace key (`atk_...`), from **Workspace settings → API Keys** on the platform
+- Or enable **Read Api Key From Environment** and set `ATLAS_API_KEY` before launching the editor (useful for CI and packaged builds)
 
-Go to **Edit → Editor Preferences → Plugins → Atlas SDK** and configure:
+Workflow execution fails immediately if no key is configured.
 
-- **Output Folder** — Where downloaded files are saved
+#### Step 2: Open the Workflow Editor
+
+Use **Window → Atlas → Workflow Editor**, or the **Atlas** button on the level editor play toolbar.
+
+#### Step 3: Configure paths (optional)
+
+In the same settings page, adjust:
+
+- **Output Folder** — Root for per-run job archives (`job.json`, `inputs/`, `outputs/`)
 - **Default Import Path** — Content Browser location for imported assets
-- **Request Timeout** — Maximum time for API requests
+- **Request Timeout**, **Status Poll Interval**, **Max Execution Time** — See [Configuration](#-configuration)
 
-#### Step 3: Import a Workflow
+#### Step 4: Import a Workflow
 
-1. Open the Atlas Workflow window via **Window → Atlas → Atlas Workflow**
+1. Open the Workflow Editor
 2. Click the **Import** button in the Workflow Library panel
 3. Select a workflow JSON file exported from the Atlas Platform
 4. The workflow will appear in your library and be ready to use
@@ -228,79 +221,18 @@ Go to **Edit → Editor Preferences → Plugins → Atlas SDK** and configure:
   <em>Imported workflows appear in the Workflow Library dropdown</em>
 </p>
 
-#### Step 4: Configure and Execute
+#### Step 5: Configure and Execute
 
 1. Select the imported workflow from the dropdown
 2. Configure input values using the input panel (choose between "From File" or "From Project" for assets)
 3. Click **Run [Workflow Name]** to execute
-4. Monitor progress in the Running Jobs panel
+4. Monitor progress in the Workflow Editor; completed runs write files under your **Output Folder**
 
 ---
 
 ### Working with Outputs
 
-Once a workflow completes, the results appear in the **Job History** panel. This is where you manage and import your generated assets.
-
-#### The Recommended Workflow
-
-1. **Run your workflow** from the Current Workflow panel
-2. **Monitor progress** in the Running Jobs panel  
-3. **View completed jobs** in the Job History panel
-4. **Use the Import buttons** to bring assets into your project
-
-> ⚠️ **Important:** Don't manually copy output files! Use the **Import** buttons in Job History — they properly import assets to your Content Browser and keep them organized.
-
-#### Importing Images
-
-When a workflow generates images, you'll see them in the Job History with an **Import** button:
-
-<p align="center">
-  <img src="Docs/Images/JobHistory_ImportImages.png" alt="Import Images Button" width="80%"/>
-  <br/>
-  <em>Click Import to bring generated images into your Content Browser</em>
-</p>
-
-After importing, the images appear in your project and the UI updates to show they've been imported:
-
-<p align="center">
-  <img src="Docs/Images/JobHistory_ImportedImages.png" alt="Imported Images" width="80%"/>
-  <br/>
-  <em>Imported images — The UI shows they're now part of your project</em>
-</p>
-
-#### Importing Meshes
-
-The same workflow applies for 3D meshes (GLB/FBX):
-
-<p align="center">
-  <img src="Docs/Images/JobHistory_ImportMeshespng.png" alt="Import Meshes Button" width="80%"/>
-  <br/>
-  <em>Click Import to bring generated meshes into your Content Browser</em>
-</p>
-
-<p align="center">
-  <img src="Docs/Images/JobHistory_ImportedMehses.png" alt="Imported Meshes" width="80%"/>
-  <br/>
-  <em>Imported meshes — Ready to use in your scene</em>
-</p>
-
-#### Where Assets Are Stored
-
-By default, all imported assets are saved to:
-
-```
-Content/Atlas/Imported/{WorkflowName}/{RunFolder}/
-```
-
-Each workflow and run gets its own subfolder to keep imported assets organized:
-
-<p align="center">
-  <img src="Docs/Images/JobHistory_ImportedDefaultFolders.png" alt="Default Import Folders" width="60%"/>
-  <br/>
-  <em>Assets are organized by workflow name in Content/Atlas/Imported/</em>
-</p>
-
-Generated files are archived outside the Content Browser in the configured **Output Folder**:
+When a run completes, the plugin archives everything under your configured **Output Folder**:
 
 ```text
 {OutputFolder}/{WorkflowName}/{RunFolder}/
@@ -309,10 +241,20 @@ Generated files are archived outside the Content Browser in the configured **Out
   outputs/
 ```
 
-The `inputs/` folder contains copies of file-backed inputs used for the run, `outputs/` contains generated files, and `job.json` stores the run metadata. Use the Job History import buttons to bring generated assets into the Content Browser.
+- **`inputs/`** — Copies of file-backed inputs used for the run  
+- **`outputs/`** — Generated files from the platform  
+- **`job.json`** — Run metadata (state, IDs, paths)
 
-> **Note:** Keep imported assets in this location. The plugin uses this folder to detect which outputs have already been imported, preventing duplicates and allowing you to track import status across editor sessions.
->
+Use the Workflow Editor **Import** actions (or Blueprint/runtime import APIs) to bring textures and meshes into the Content Browser. Prefer import over manually copying files from `outputs/` so paths stay consistent with the plugin.
+
+#### Content Browser layout
+
+By default, imported assets go to:
+
+```text
+Content/Atlas/Imported/{WorkflowName}/{RunFolder}/
+```
+
 > **Blueprint migration:** If you maintain Editor Utility Widgets or graphs that manually build old flat output paths, see [`Docs/BlueprintMigrationGuide.md`](Docs/BlueprintMigrationGuide.md).
 
 ---
@@ -366,7 +308,7 @@ A **Workflow Asset** (`UAtlasWorkflowAsset`) is a native Unreal asset that defin
 - **Inputs** — Parameters required to execute the workflow
 - **Outputs** — Results produced by the workflow
 
-Workflow assets are created by importing JSON workflow definitions via the **Import** button in the Atlas Workflow editor window. The JSON schema is exported from the Atlas Platform.
+Workflow assets are created by importing JSON workflow definitions via the **Import** button in the Workflow Editor. Export **API v0.2** JSON from the Atlas Platform; the asset’s `version` field drives upload/download URL shape and multipart upload behavior.
 
 #### Job
 
@@ -462,6 +404,15 @@ Initializing → Uploading → Executing → Downloading → Done
 
 Access settings via **Edit → Editor Preferences → Plugins → Atlas SDK**
 
+### Authentication
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| **Workspace Api Key** | *(empty)* | Bearer token for Atlas Platform (`atk_...`). Required for all workflow runs. |
+| **Read Api Key From Environment** | Disabled | When the key field is empty, use `ATLAS_API_KEY` from the environment |
+
+Keys are sent as `Authorization: Bearer <key>` on upload, execute, status, and download requests.
+
 ### Output Settings
 
 | Setting | Default | Description |
@@ -480,9 +431,9 @@ Access settings via **Edit → Editor Preferences → Plugins → Atlas SDK**
 
 | Setting | Default | Range | Description |
 |---------|---------|-------|-------------|
-| **Request Timeout** | 120s | 10-600s | HTTP request timeout |
-| **Status Poll Interval** | 2s | 0.5-30s | How often to check job status |
-| **Max Execution Time** | 600s | 30-3600s | Maximum job duration |
+| **Request Timeout** | 120s | 10-600s | Per-request HTTP timeout (`0` = no timeout) |
+| **Status Poll Interval** | 5s | 0.5-30s | How often to poll async job status |
+| **Max Execution Time** | 900s | 30-3600s | Maximum job duration before timeout |
 
 ### Cache Settings
 
@@ -504,6 +455,18 @@ Access settings via **Edit → Editor Preferences → Plugins → Atlas SDK**
 ## 🔧 Troubleshooting
 
 ### Common Issues
+
+#### "Configure a workspace API key" / HTTP 401 or 403
+
+**Possible causes:**
+- No API key in Editor Preferences or environment
+- Invalid or revoked key
+- Workflow JSON from a workspace you cannot access
+
+**Solutions:**
+1. Set **Workspace Api Key** under **Authentication**, or set `ATLAS_API_KEY` and enable **Read Api Key From Environment**
+2. Create a new key in Atlas **Workspace settings → API Keys**
+3. Re-import workflow JSON exported for your workspace (v0.2)
 
 #### "Workflow execution timed out"
 
@@ -559,6 +522,12 @@ Add to `DefaultEngine.ini`:
 LogAtlas=Verbose
 LogAtlasHTTP=Verbose
 ```
+
+---
+
+## 📝 Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for release notes (including the API v0.2 migration).
 
 ---
 

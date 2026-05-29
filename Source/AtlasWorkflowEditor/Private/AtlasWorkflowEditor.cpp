@@ -14,6 +14,9 @@
 
 #define LOCTEXT_NAMESPACE "FAtlasWorkflowEditorModule"
 
+// Set true when Batch Editor and standalone Job History are ready for a public release.
+static constexpr bool GAtlasExposeBatchAndJobHistoryUI = false;
+
 // EUW asset paths — update these if you move the widgets
 static const TCHAR* GWorkflowEditorPath = TEXT("/AtlasWorkflow/Core/UI/Editor/EUW_AtlasMain.EUW_AtlasMain");
 static const TCHAR* GBatchEditorPath    = TEXT("/AtlasWorkflow/Core/UI/Editor/EUW_BatchEditor.EUW_BatchEditor");
@@ -66,7 +69,7 @@ void FAtlasWorkflowEditorModule::RegisterMenus()
 	FToolMenuEntry SubMenuEntry = FToolMenuEntry::InitSubMenu(
 		"AtlasToolbar",
 		LOCTEXT("AtlasToolbarLabel", "Atlas"),
-		LOCTEXT("AtlasToolbarTooltip", "Atlas Platform tools — workflow editor, batch processing, job history"),
+		LOCTEXT("AtlasToolbarTooltip", "Atlas Platform workflow editor"),
 		FNewToolMenuDelegate::CreateStatic(&FAtlasWorkflowEditorModule::BuildAtlasToolbarMenu),
 		false,
 		FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.GameSettings")
@@ -87,21 +90,24 @@ void FAtlasWorkflowEditorModule::RegisterMenus()
 		FUIAction(FExecuteAction::CreateRaw(this, &FAtlasWorkflowEditorModule::OpenWorkflowEditor))
 	);
 
-	WindowSection.AddMenuEntry(
-		"OpenBatchEditor",
-		LOCTEXT("WindowBatchEditor", "Batch Editor"),
-		LOCTEXT("WindowBatchEditorTip", "Open the batch workflow editor"),
-		FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.GameSettings"),
-		FUIAction(FExecuteAction::CreateRaw(this, &FAtlasWorkflowEditorModule::OpenBatchEditor))
-	);
+	if (GAtlasExposeBatchAndJobHistoryUI)
+	{
+		WindowSection.AddMenuEntry(
+			"OpenBatchEditor",
+			LOCTEXT("WindowBatchEditor", "Batch Editor"),
+			LOCTEXT("WindowBatchEditorTip", "Open the batch workflow editor"),
+			FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.GameSettings"),
+			FUIAction(FExecuteAction::CreateRaw(this, &FAtlasWorkflowEditorModule::OpenBatchEditor))
+		);
 
-	WindowSection.AddMenuEntry(
-		"OpenJobHistory",
-		LOCTEXT("WindowJobHistory", "Job History"),
-		LOCTEXT("WindowJobHistoryTip", "Open the job history viewer"),
-		FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.GameSettings"),
-		FUIAction(FExecuteAction::CreateRaw(this, &FAtlasWorkflowEditorModule::OpenJobHistory))
-	);
+		WindowSection.AddMenuEntry(
+			"OpenJobHistory",
+			LOCTEXT("WindowJobHistory", "Job History"),
+			LOCTEXT("WindowJobHistoryTip", "Open the job history viewer"),
+			FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.GameSettings"),
+			FUIAction(FExecuteAction::CreateRaw(this, &FAtlasWorkflowEditorModule::OpenJobHistory))
+		);
+	}
 }
 
 void FAtlasWorkflowEditorModule::BuildAtlasToolbarMenu(UToolMenu* Menu)
@@ -119,27 +125,30 @@ void FAtlasWorkflowEditorModule::BuildAtlasToolbarMenu(UToolMenu* Menu)
 		}))
 	);
 
-	Section.AddMenuEntry(
-		"BatchEditor",
-		LOCTEXT("ToolbarBatchEditor", "Batch Editor"),
-		LOCTEXT("ToolbarBatchEditorTip", "Run multiple workflow variations as a batch"),
-		FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.GameSettings"),
-		FUIAction(FExecuteAction::CreateLambda([]()
-		{
-			FModuleManager::GetModuleChecked<FAtlasWorkflowEditorModule>("AtlasWorkflowEditor").OpenBatchEditor();
-		}))
-	);
+	if (GAtlasExposeBatchAndJobHistoryUI)
+	{
+		Section.AddMenuEntry(
+			"BatchEditor",
+			LOCTEXT("ToolbarBatchEditor", "Batch Editor"),
+			LOCTEXT("ToolbarBatchEditorTip", "Run multiple workflow variations as a batch"),
+			FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.GameSettings"),
+			FUIAction(FExecuteAction::CreateLambda([]()
+			{
+				FModuleManager::GetModuleChecked<FAtlasWorkflowEditorModule>("AtlasWorkflowEditor").OpenBatchEditor();
+			}))
+		);
 
-	Section.AddMenuEntry(
-		"JobHistory",
-		LOCTEXT("ToolbarJobHistory", "Job History"),
-		LOCTEXT("ToolbarJobHistoryTip", "View running jobs, history, and batch results"),
-		FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.GameSettings"),
-		FUIAction(FExecuteAction::CreateLambda([]()
-		{
-			FModuleManager::GetModuleChecked<FAtlasWorkflowEditorModule>("AtlasWorkflowEditor").OpenJobHistory();
-		}))
-	);
+		Section.AddMenuEntry(
+			"JobHistory",
+			LOCTEXT("ToolbarJobHistory", "Job History"),
+			LOCTEXT("ToolbarJobHistoryTip", "View running jobs, history, and batch results"),
+			FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.GameSettings"),
+			FUIAction(FExecuteAction::CreateLambda([]()
+			{
+				FModuleManager::GetModuleChecked<FAtlasWorkflowEditorModule>("AtlasWorkflowEditor").OpenJobHistory();
+			}))
+		);
+	}
 }
 
 // ==================== EUW Launchers ====================
