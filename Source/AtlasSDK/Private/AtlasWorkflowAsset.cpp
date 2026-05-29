@@ -233,6 +233,7 @@ bool UAtlasWorkflowAsset::ParseParameterDef(const TSharedPtr<FJsonObject>& JsonO
 	FString FormatStr;
 	if (JsonObject->TryGetStringField(TEXT("format"), FormatStr))
 	{
+		OutDef.Format = FormatStr;
 		OutDef.AllowedExtensions.Add(FormatStr);
 	}
 
@@ -298,6 +299,10 @@ EAtlasValueType UAtlasWorkflowAsset::StringToValueType(const FString& TypeString
 	if (LowerType == TEXT("mesh") || LowerType == TEXT("3d") || LowerType == TEXT("model"))
 	{
 		return EAtlasValueType::Mesh;
+	}
+	if (LowerType == TEXT("audio") || LowerType == TEXT("sound") || LowerType == TEXT("music"))
+	{
+		return EAtlasValueType::Audio;
 	}
 	if (LowerType == TEXT("json") || LowerType == TEXT("object") || LowerType == TEXT("array"))
 	{

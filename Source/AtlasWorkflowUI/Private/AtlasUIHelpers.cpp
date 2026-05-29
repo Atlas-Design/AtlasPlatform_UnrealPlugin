@@ -2,7 +2,10 @@
 
 #include "AtlasUIHelpers.h"
 #include "AtlasEditorSubsystem.h"
+#include "AtlasJob.h"
+#include "AtlasOutputManager.h"
 #include "AtlasWorkflowAsset.h"
+#include "AtlasBatchPersistence.h"
 #include "Types/AtlasSchemaTypes.h"
 #include "DesktopPlatformModule.h"
 #include "IDesktopPlatform.h"
@@ -10,6 +13,7 @@
 #include "Framework/Notifications/NotificationManager.h"
 #include "Widgets/Notifications/SNotificationList.h"
 #include "HAL/PlatformApplicationMisc.h"
+#include "HAL/PlatformProcess.h"
 #include "HAL/FileManager.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Editor.h"
@@ -171,6 +175,9 @@ bool UAtlasUIHelpers::OpenFileDialogForType(EAtlasValueType Type, const TArray<F
 	case EAtlasValueType::Mesh:
 		Title = TEXT("Select Mesh File");
 		break;
+	case EAtlasValueType::Audio:
+		Title = TEXT("Select Audio File");
+		break;
 	default:
 		Title = TEXT("Select File");
 		break;
@@ -326,6 +333,9 @@ FString UAtlasUIHelpers::GetFileFilterForType(EAtlasValueType Type, const TArray
 	case EAtlasValueType::Mesh:
 		return TEXT("Mesh Files (*.fbx;*.obj;*.glb;*.gltf)|*.fbx;*.obj;*.glb;*.gltf|All Files (*.*)|*.*");
 
+	case EAtlasValueType::Audio:
+		return TEXT("Audio Files (*.mp3;*.wav;*.ogg;*.flac)|*.mp3;*.wav;*.ogg;*.flac|All Files (*.*)|*.*");
+
 	case EAtlasValueType::File:
 	default:
 		return TEXT("All Files (*.*)|*.*");
@@ -385,6 +395,11 @@ bool UAtlasUIHelpers::ValidateFilePath(const FString& FilePath, EAtlasValueType 
 			if (!bAllowed) OutError = TEXT("Invalid mesh format. Allowed: fbx, obj, glb, gltf");
 			break;
 
+		case EAtlasValueType::Audio:
+			bAllowed = (Extension == TEXT("mp3") || Extension == TEXT("wav") || Extension == TEXT("ogg") || Extension == TEXT("flac"));
+			if (!bAllowed) OutError = TEXT("Invalid audio format. Allowed: mp3, wav, ogg, flac");
+			break;
+
 		default:
 			// Generic file - any extension is fine
 			break;
@@ -412,6 +427,19 @@ FString UAtlasUIHelpers::GetCleanFilename(const FString& FilePath)
 FString UAtlasUIHelpers::GetFileExtension(const FString& FilePath)
 {
 	return FPaths::GetExtension(FilePath);
+}
+
+bool UAtlasUIHelpers::OpenFolder(const FString& FolderPath)
+{
+	if (FolderPath.IsEmpty() || !FPaths::DirectoryExists(FolderPath))
+	{
+		return false;
+	}
+
+	FString NormalizedPath = FolderPath;
+	FPaths::NormalizeDirectoryName(NormalizedPath);
+	FPlatformProcess::ExploreFolder(*NormalizedPath);
+	return true;
 }
 
 // ==================== Image Loading ====================
@@ -491,6 +519,8 @@ FLinearColor UAtlasUIHelpers::GetColorForValueType(EAtlasValueType Type)
 		return GetImageColor();
 	case EAtlasValueType::Mesh:
 		return GetMeshColor();
+	case EAtlasValueType::Audio:
+		return GetAudioColor();
 	case EAtlasValueType::File:
 	case EAtlasValueType::FileId:
 		return GetFileColor();
@@ -522,6 +552,11 @@ FLinearColor UAtlasUIHelpers::GetImageColor()
 FLinearColor UAtlasUIHelpers::GetMeshColor()
 {
 	return FLinearColor(0.608f, 0.349f, 0.714f); // #9B59B6 - Purple
+}
+
+FLinearColor UAtlasUIHelpers::GetAudioColor()
+{
+	return FLinearColor(0.102f, 0.737f, 0.612f); // #1ABC9C - Teal/Cyan
 }
 
 FLinearColor UAtlasUIHelpers::GetFileColor()
@@ -584,6 +619,8 @@ FAtlasValue UAtlasUIHelpers::MakeFileValue(const FString& FilePath, EAtlasValueT
 		return FAtlasValue::MakeImage(FilePath);
 	case EAtlasValueType::Mesh:
 		return FAtlasValue::MakeMesh(FilePath);
+	case EAtlasValueType::Audio:
+		return FAtlasValue::MakeAudio(FilePath);
 	case EAtlasValueType::File:
 	default:
 		return FAtlasValue::MakeFile(FilePath);
@@ -756,6 +793,79 @@ FString UAtlasUIHelpers::FormatDuration(float DurationSeconds)
 	return FString::Printf(TEXT("%02d:%02d"), Minutes, Seconds);
 }
 
+FString UAtlasUIHelpers::FormatJobRunLabel(UAtlasJob* Job)
+{
+	if (!Job)
+	{
+		return FString();
+	}
+
+	UAtlasOutputManager* OutputManager = NewObject<UAtlasOutputManager>();
+	const FAtlasJobFolderInfo FolderInfo = OutputManager ? OutputManager->GetJobFolderInfo(Job) : FAtlasJobFolderInfo();
+	return FolderInfo.JobFolderName;
+}
+
+FString UAtlasUIHelpers::FormatJobRunLabelFromHistory(const FAtlasJobHistoryRecord& HistoryRecord)
+{
+	if (!HistoryRecord.IsValid())
+	{
+		return FString();
+	}
+
+	if (!HistoryRecord.JobFolderPath.IsEmpty())
+	{
+		FString JobFolderPath = HistoryRecord.JobFolderPath;
+		FPaths::NormalizeDirectoryName(JobFolderPath);
+		return FPaths::GetCleanFilename(JobFolderPath);
+	}
+
+	return UAtlasOutputManager::GenerateJobFolderName(HistoryRecord.StartedAt, HistoryRecord.JobId);
+}
+
+bool UAtlasUIHelpers::OpenJobRunFolder(UAtlasJob* Job)
+{
+	if (!Job)
+	{
+		return false;
+	}
+
+	UAtlasOutputManager* OutputManager = NewObject<UAtlasOutputManager>();
+	return OutputManager ? OpenFolder(OutputManager->GetJobRunFolder(Job)) : false;
+}
+
+bool UAtlasUIHelpers::OpenJobOutputsFolder(UAtlasJob* Job)
+{
+	if (!Job)
+	{
+		return false;
+	}
+
+	UAtlasOutputManager* OutputManager = NewObject<UAtlasOutputManager>();
+	return OutputManager ? OpenFolder(OutputManager->GetJobOutputsFolder(Job)) : false;
+}
+
+bool UAtlasUIHelpers::OpenJobRunFolderFromHistory(const FAtlasJobHistoryRecord& HistoryRecord)
+{
+	if (!HistoryRecord.IsValid())
+	{
+		return false;
+	}
+
+	UAtlasOutputManager* OutputManager = NewObject<UAtlasOutputManager>();
+	return OutputManager ? OpenFolder(OutputManager->GetJobRunFolderFromHistory(HistoryRecord)) : false;
+}
+
+bool UAtlasUIHelpers::OpenJobOutputsFolderFromHistory(const FAtlasJobHistoryRecord& HistoryRecord)
+{
+	if (!HistoryRecord.IsValid())
+	{
+		return false;
+	}
+
+	UAtlasOutputManager* OutputManager = NewObject<UAtlasOutputManager>();
+	return OutputManager ? OpenFolder(OutputManager->GetJobOutputsFolderFromHistory(HistoryRecord)) : false;
+}
+
 void UAtlasUIHelpers::CopyToClipboard(const FString& Text)
 {
 	FPlatformApplicationMisc::ClipboardCopy(*Text);
@@ -772,4 +882,37 @@ void UAtlasUIHelpers::ShowNotification(const FString& Message, bool bSuccess)
 		: FCoreStyle::Get().GetBrush(TEXT("NotificationList.FailImage"));
 
 	FSlateNotificationManager::Get().AddNotification(Info);
+}
+
+// ==================== Batch Colors ====================
+
+FLinearColor UAtlasUIHelpers::GetBatchStatusColor(EAtlasBatchRowStatus Status)
+{
+	switch (Status)
+	{
+	case EAtlasBatchRowStatus::Pending:   return GetPendingColor();
+	case EAtlasBatchRowStatus::Running:   return GetRunningColor();
+	case EAtlasBatchRowStatus::Succeeded: return GetSuccessColor();
+	case EAtlasBatchRowStatus::Failed:    return GetFailedColor();
+	case EAtlasBatchRowStatus::Cancelled: return GetCancelledColor();
+	default:                              return GetPendingColor();
+	}
+}
+
+FLinearColor UAtlasUIHelpers::GetCancelledColor()
+{
+	return FLinearColor(0.498f, 0.549f, 0.553f); // #7F8C8D - Darker gray than Pending
+}
+
+// ==================== Batch File Dialogs ====================
+
+bool UAtlasUIHelpers::OpenBatchDraftPicker(FString& OutFilePath)
+{
+	FString DraftsDir = UAtlasBatchPersistence::GetDraftsDirectory();
+	return OpenFileDialog(
+		TEXT("Select Batch Draft"),
+		DraftsDir,
+		TEXT("JSON Files (*.json)|*.json"),
+		OutFilePath
+	);
 }

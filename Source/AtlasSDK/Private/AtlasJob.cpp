@@ -5,7 +5,12 @@
 #include "AtlasFileManager.h"
 #include "AtlasHttpRequest.h"
 #include "AtlasJsonObject.h"
+#include "AtlasOutputManager.h"
+#include "AtlasSDKSettings.h"
 #include "Async/Async.h"
+#include "HAL/PlatformFileManager.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
 #include "TimerManager.h"
 #include "Engine/World.h"
 
@@ -88,13 +93,35 @@ bool UAtlasJob::Execute()
 	bExecutionStarted = true;
 	StartedAt = FDateTime::Now();  // Use local time for display consistency
 
+	// Read poll interval and max execution time from project settings
+	if (const UAtlasSDKSettings* Settings = UAtlasSDKSettings::Get())
+	{
+		PollIntervalSeconds = Settings->StatusPollIntervalSeconds;
+		MaxExecutionTimeSeconds = Settings->MaxExecutionTimeSeconds;
+	}
+
+	// Archive file-backed inputs before Running is broadcast so initial job.json
+	// points at the durable per-run inputs folder.
+	ArchiveInputFilesToRunFolder();
+
 	// Transition to Running state
 	SetState(EAtlasJobState::Running);
 	SetPhase(EAtlasJobPhase::Initializing);
 	SetProgress(0.0f);
 
-	UE_LOG(LogTemp, Log, TEXT("AtlasJob[%s] started execution for workflow '%s'"),
-		*JobId.ToString(EGuidFormats::DigitsWithHyphens), *WorkflowName);
+	UE_LOG(LogTemp, Log, TEXT("AtlasJob[%s] started execution for workflow '%s' (poll=%.1fs, timeout=%.0fs)"),
+		*JobId.ToString(EGuidFormats::DigitsWithHyphens), *WorkflowName, PollIntervalSeconds, MaxExecutionTimeSeconds);
+
+	// Start execution timeout timer
+	if (MaxExecutionTimeSeconds > 0.0f && GWorld)
+	{
+		GWorld->GetTimerManager().SetTimer(
+			ExecutionTimeoutHandle,
+			FTimerDelegate::CreateUObject(this, &UAtlasJob::OnExecutionTimeout),
+			MaxExecutionTimeSeconds,
+			false
+		);
+	}
 
 	// Start the pipeline: scan inputs for files
 	ScanInputsForUploads();
@@ -164,6 +191,114 @@ void UAtlasJob::Cancel()
 
 // ==================== Pipeline: Upload Phase ====================
 
+void UAtlasJob::ArchiveInputFilesToRunFolder()
+{
+	UAtlasOutputManager* OutputManager = NewObject<UAtlasOutputManager>(this);
+	if (!OutputManager)
+	{
+		return;
+	}
+
+	const FAtlasJobFolderInfo FolderInfo = OutputManager->GetJobFolderInfo(this);
+	if (!FolderInfo.IsValid() || FolderInfo.InputsDiskPath.IsEmpty())
+	{
+		return;
+	}
+
+	IFileManager::Get().MakeDirectory(*FolderInfo.InputsDiskPath, true);
+
+	for (auto& Pair : Inputs.Values)
+	{
+		const FString& InputName = Pair.Key;
+		FAtlasValue& Value = Pair.Value;
+
+		if (!Value.IsFileType() || !Value.FileId.IsEmpty())
+		{
+			continue;
+		}
+
+		const FString SourcePath = Value.FilePath;
+		const bool bHasSourceFile = !SourcePath.IsEmpty() && FPaths::FileExists(SourcePath);
+		const bool bHasInlineBytes = Value.FileData.Num() > 0;
+		if (!bHasSourceFile && !bHasInlineBytes)
+		{
+			if (!SourcePath.IsEmpty())
+			{
+				UE_LOG(LogTemp, Warning, TEXT("AtlasJob[%s] input '%s' source file is missing: %s"),
+					*JobId.ToString(EGuidFormats::DigitsWithHyphens), *InputName, *SourcePath);
+			}
+			continue;
+		}
+
+		FString Extension;
+		if (bHasSourceFile)
+		{
+			Extension = FPaths::GetExtension(SourcePath, true);
+		}
+		if (Extension.IsEmpty() && !Value.FileName.IsEmpty())
+		{
+			Extension = FPaths::GetExtension(Value.FileName, true);
+		}
+		if (Extension.IsEmpty())
+		{
+			switch (Value.Type)
+			{
+			case EAtlasValueType::Image:
+				Extension = TEXT(".png");
+				break;
+			case EAtlasValueType::Mesh:
+				Extension = TEXT(".glb");
+				break;
+			case EAtlasValueType::Audio:
+				Extension = TEXT(".mp3");
+				break;
+			default:
+				Extension = TEXT(".bin");
+				break;
+			}
+		}
+
+		const FString SafeInputName = UAtlasOutputManager::SanitizeParameterName(InputName);
+		const FString DestFileName = FString::Printf(TEXT("Input_%s%s"), *SafeInputName, *Extension);
+		const FString DestPath = FPaths::Combine(FolderInfo.InputsDiskPath, DestFileName);
+
+		bool bArchived = false;
+		if (bHasSourceFile)
+		{
+			FString NormalizedSource = FPaths::ConvertRelativePathToFull(SourcePath);
+			FString NormalizedDest = FPaths::ConvertRelativePathToFull(DestPath);
+			FPaths::NormalizeFilename(NormalizedSource);
+			FPaths::NormalizeFilename(NormalizedDest);
+
+			if (NormalizedSource.Equals(NormalizedDest, ESearchCase::IgnoreCase))
+			{
+				bArchived = true;
+			}
+			else
+			{
+				bArchived = (IFileManager::Get().Copy(*DestPath, *SourcePath, true, true) == COPY_OK);
+			}
+		}
+		else if (bHasInlineBytes)
+		{
+			bArchived = FFileHelper::SaveArrayToFile(Value.FileData, *DestPath);
+		}
+
+		if (bArchived)
+		{
+			Value.FilePath = DestPath;
+			Value.FileName = DestFileName;
+			UE_LOG(LogTemp, Log, TEXT("AtlasJob[%s] archived input '%s' to %s"),
+				*JobId.ToString(EGuidFormats::DigitsWithHyphens), *InputName, *DestPath);
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("AtlasJob[%s] failed to archive input '%s' to %s"),
+				*JobId.ToString(EGuidFormats::DigitsWithHyphens), *InputName, *DestPath);
+		}
+	}
+}
+
 void UAtlasJob::ScanInputsForUploads()
 {
 	FilesToUpload.Empty();
@@ -176,6 +311,7 @@ void UAtlasJob::ScanInputsForUploads()
 		// Check if this input is a file type that needs uploading
 		if (Value.Type == EAtlasValueType::Image || 
 			Value.Type == EAtlasValueType::Mesh || 
+			Value.Type == EAtlasValueType::Audio ||
 			Value.Type == EAtlasValueType::File)
 		{
 			// If it already has a FileId, no need to upload
@@ -382,6 +518,7 @@ UAtlasJsonObject* UAtlasJob::BuildExecutePayload()
 
 		case EAtlasValueType::Image:
 		case EAtlasValueType::Mesh:
+		case EAtlasValueType::Audio:
 		case EAtlasValueType::File:
 			// Use the uploaded FileId
 			if (FString* FileIdPtr = UploadedFileIds.Find(InputName))
@@ -807,6 +944,7 @@ void UAtlasJob::ParseStatusResponse(UAtlasJsonObject* ResponseJson)
 
 		case EAtlasValueType::Image:
 		case EAtlasValueType::Mesh:
+		case EAtlasValueType::Audio:
 		case EAtlasValueType::File:
 		case EAtlasValueType::FileId:
 			// Server returns FileId for file outputs
@@ -1045,6 +1183,26 @@ void UAtlasJob::HandleDownloadFailed(const FGuid& OperationId, const FString& Er
 	}
 }
 
+// ==================== Execution Timeout ====================
+
+void UAtlasJob::OnExecutionTimeout()
+{
+	if (bCancellationRequested || AtlasJobHelpers::IsTerminalState(State))
+	{
+		return;
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("AtlasJob[%s] timed out after %.0f seconds"),
+		*JobId.ToString(EGuidFormats::DigitsWithHyphens), MaxExecutionTimeSeconds);
+
+	FAtlasError TimeoutError;
+	TimeoutError.Code = EAtlasErrorCode::Timeout;
+	TimeoutError.Message = FString::Printf(
+		TEXT("Job exceeded maximum execution time of %.0f seconds"), MaxExecutionTimeSeconds);
+	TimeoutError.Timestamp = FDateTime::UtcNow();
+	FailWithError(TimeoutError);
+}
+
 // ==================== State Management ====================
 
 void UAtlasJob::SetState(EAtlasJobState NewState)
@@ -1093,6 +1251,12 @@ void UAtlasJob::CompleteWithOutputs(const FAtlasWorkflowOutputs& InOutputs)
 		return;
 	}
 
+	// Clear execution timeout timer
+	if (GWorld)
+	{
+		GWorld->GetTimerManager().ClearTimer(ExecutionTimeoutHandle);
+	}
+
 	Outputs = InOutputs;
 	CompletedAt = FDateTime::Now();  // Use local time for display consistency
 	
@@ -1120,6 +1284,12 @@ void UAtlasJob::FailWithError(const FAtlasError& InError)
 	// Cleanup any pending resources
 	CleanupExecuteRequest();
 	CleanupStatusRequest();
+
+	// Clear execution timeout timer
+	if (GWorld)
+	{
+		GWorld->GetTimerManager().ClearTimer(ExecutionTimeoutHandle);
+	}
 	
 	if (FileManager)
 	{

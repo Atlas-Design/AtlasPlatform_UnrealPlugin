@@ -41,7 +41,10 @@ enum class EAtlasJobStatus : uint8
 	Failed UMETA(DisplayName = "Failed"),
 
 	/** Job was cancelled */
-	Cancelled UMETA(DisplayName = "Cancelled")
+	Cancelled UMETA(DisplayName = "Cancelled"),
+
+	/** Job is currently running (written on start, updated on completion) */
+	Running UMETA(DisplayName = "Running")
 };
 
 /**
@@ -95,9 +98,43 @@ struct ATLASSDK_API FAtlasJobHistoryRecord
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Atlas|History")
 	FString ErrorMessage;
 
+	/** Batch ID if this job was part of a batch run (empty for standalone jobs) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Atlas|History")
+	FString BatchId;
+
+	/** Row index within the batch (INDEX_NONE for standalone jobs) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Atlas|History")
+	int32 BatchIndex = INDEX_NONE;
+
+	/** Check if this record belongs to a batch */
+	bool IsBatchJob() const { return !BatchId.IsEmpty() && BatchIndex != INDEX_NONE; }
+
+	/** If this job was a retry, the JobId of the previous attempt */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Atlas|History")
+	FGuid RetryOfJobId;
+
+	/** Check if this record represents a retry of a previous job */
+	bool IsRetry() const { return RetryOfJobId.IsValid(); }
+
 	/** Path to saved output file on disk (if downloaded and saved) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Atlas|History")
 	TMap<FString, FString> OutputFilePaths;
+
+	/** Root folder for this run's durable archive */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Atlas|History")
+	FString JobFolderPath;
+
+	/** Folder containing archived input files for this run */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Atlas|History")
+	FString InputsFolderPath;
+
+	/** Folder containing generated output files for this run */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Atlas|History")
+	FString OutputsFolderPath;
+
+	/** Path to this run's per-run metadata JSON file */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Atlas|History")
+	FString JobJsonPath;
 
 	// ==================== Helper Methods ====================
 
@@ -208,6 +245,49 @@ struct ATLASSDK_API FAtlasJobHistoryRecord
 			return TEXT("Older");
 		}
 	}
+};
+
+/**
+ * Summary of a batch run — aggregates per-job history records
+ * for a single BatchId into a single overview entry.
+ */
+USTRUCT(BlueprintType)
+struct ATLASSDK_API FAtlasBatchSummary
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly, Category = "Atlas|History")
+	FString BatchId;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Atlas|History")
+	FString WorkflowApiId;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Atlas|History")
+	FString WorkflowName;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Atlas|History")
+	int32 TotalRows = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Atlas|History")
+	int32 SucceededCount = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Atlas|History")
+	int32 FailedCount = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Atlas|History")
+	int32 CancelledCount = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Atlas|History")
+	int32 RunningCount = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Atlas|History")
+	FDateTime StartedAt;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Atlas|History")
+	FDateTime CompletedAt;
+
+	/** True if every row has a terminal status */
+	bool IsComplete() const { return RunningCount == 0 && (SucceededCount + FailedCount + CancelledCount) == TotalRows; }
 };
 
 /**
@@ -343,6 +423,8 @@ namespace AtlasHistoryHelpers
 			return TEXT("Failed");
 		case EAtlasJobStatus::Cancelled:
 			return TEXT("Cancelled");
+		case EAtlasJobStatus::Running:
+			return TEXT("Running");
 		default:
 			return TEXT("Unknown");
 		}
@@ -362,6 +444,10 @@ namespace AtlasHistoryHelpers
 		else if (StatusStr == TEXT("Cancelled"))
 		{
 			return EAtlasJobStatus::Cancelled;
+		}
+		else if (StatusStr == TEXT("Running"))
+		{
+			return EAtlasJobStatus::Running;
 		}
 		return EAtlasJobStatus::Failed;
 	}

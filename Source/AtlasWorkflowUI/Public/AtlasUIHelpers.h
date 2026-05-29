@@ -6,10 +6,13 @@
 #include "Kismet/BlueprintFunctionLibrary.h"
 #include "Types/AtlasValueTypes.h"
 #include "Types/AtlasSchemaTypes.h"
+#include "Types/AtlasBatchTypes.h"
+#include "Types/AtlasHistoryTypes.h"
 #include "AtlasUIHelpers.generated.h"
 
 class UAtlasWorkflowAsset;
 class UAtlasEditorSubsystem;
+class UAtlasJob;
 class UTexture2D;
 class UStaticMesh;
 
@@ -227,6 +230,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Atlas|UI|Files")
 	static FString GetFileExtension(const FString& FilePath);
 
+	/** Open a folder in the platform file browser. Returns false if the folder does not exist. */
+	UFUNCTION(BlueprintCallable, Category = "Atlas|UI|Files")
+	static bool OpenFolder(const FString& FolderPath);
+
 	// ==================== Image Loading ====================
 
 	/**
@@ -287,6 +294,10 @@ public:
 	/** Get the color for Mesh type (Purple) */
 	UFUNCTION(BlueprintPure, Category = "Atlas|UI|Colors")
 	static FLinearColor GetMeshColor();
+
+	/** Get the color for Audio type (Teal/Cyan) */
+	UFUNCTION(BlueprintPure, Category = "Atlas|UI|Colors")
+	static FLinearColor GetAudioColor();
 
 	/** Get the color for File type (Gray) */
 	UFUNCTION(BlueprintPure, Category = "Atlas|UI|Colors")
@@ -468,6 +479,30 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Atlas|UI|Utilities")
 	static FString FormatDuration(float DurationSeconds);
 
+	/** Format a stable display label for an active job's run archive folder. */
+	UFUNCTION(BlueprintPure, Category = "Atlas|UI|Jobs")
+	static FString FormatJobRunLabel(UAtlasJob* Job);
+
+	/** Format a stable display label for a history record's run archive folder. */
+	UFUNCTION(BlueprintPure, Category = "Atlas|UI|Jobs")
+	static FString FormatJobRunLabelFromHistory(const FAtlasJobHistoryRecord& HistoryRecord);
+
+	/** Open an active job's run archive root folder. */
+	UFUNCTION(BlueprintCallable, Category = "Atlas|UI|Jobs")
+	static bool OpenJobRunFolder(UAtlasJob* Job);
+
+	/** Open an active job's outputs folder. */
+	UFUNCTION(BlueprintCallable, Category = "Atlas|UI|Jobs")
+	static bool OpenJobOutputsFolder(UAtlasJob* Job);
+
+	/** Open a history record's run archive root folder. */
+	UFUNCTION(BlueprintCallable, Category = "Atlas|UI|Jobs")
+	static bool OpenJobRunFolderFromHistory(const FAtlasJobHistoryRecord& HistoryRecord);
+
+	/** Open a history record's outputs folder. */
+	UFUNCTION(BlueprintCallable, Category = "Atlas|UI|Jobs")
+	static bool OpenJobOutputsFolderFromHistory(const FAtlasJobHistoryRecord& HistoryRecord);
+
 	/**
 	 * Copy text to the system clipboard.
 	 * @param Text The text to copy
@@ -482,6 +517,31 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Atlas|UI|Utilities")
 	static void ShowNotification(const FString& Message, bool bSuccess = true);
+
+	// ==================== Batch Colors ====================
+
+	/**
+	 * Get the color for a batch row status.
+	 * Maps: Pending→Gray, Running→Yellow, Succeeded→Green, Failed→Red, Cancelled→Gray.
+	 * @param Status The batch row status
+	 * @return Color for the status
+	 */
+	UFUNCTION(BlueprintPure, Category = "Atlas|UI|Colors")
+	static FLinearColor GetBatchStatusColor(EAtlasBatchRowStatus Status);
+
+	/** Get Cancelled status color (Gray, distinct from Pending) */
+	UFUNCTION(BlueprintPure, Category = "Atlas|UI|Colors")
+	static FLinearColor GetCancelledColor();
+
+	// ==================== Batch File Dialogs ====================
+
+	/**
+	 * Open a file dialog scoped to the batch drafts directory.
+	 * @param OutFilePath The selected file path
+	 * @return True if user selected a file
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Atlas|UI|Batch")
+	static bool OpenBatchDraftPicker(FString& OutFilePath);
 
 private:
 	/** Get parent window handle for dialogs */

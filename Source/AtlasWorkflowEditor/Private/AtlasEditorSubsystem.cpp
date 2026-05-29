@@ -1,15 +1,40 @@
 #include "AtlasEditorSubsystem.h"
 #include "AtlasJobManager.h"
+#include "AtlasHistoryManager.h"
+#include "AtlasTempStorageManager.h"
+#include "AtlasSDKSettings.h"
 #include "AtlasJob.h"
 #include "AtlasWorkflowAsset.h"
 #include "AtlasFileManager.h"
 #include "AtlasOutputManager.h"
+#include "Framework/Notifications/NotificationManager.h"
+#include "Widgets/Notifications/SNotificationList.h"
 
 void UAtlasEditorSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
 	UE_LOG(LogTemp, Log, TEXT("[AtlasEditorSubsystem] Initialize"));
-	// JobManager, FileManager, OutputManager are created lazily on first access
+
+	// Reconcile any jobs that were still running when the editor last shut down
+	UAtlasHistoryManager* HistoryMgr = GetJobManager()->GetHistoryManager();
+	if (HistoryMgr)
+	{
+		HistoryMgr->ReconcileStaleJobs();
+	}
+
+	// Clean up temp directories on editor start if enabled
+	const UAtlasSDKSettings* Settings = UAtlasSDKSettings::Get();
+	if (Settings && Settings->bCleanTempOnEditorStart)
+	{
+		int32 Cleaned = UAtlasTempStorageManager::CleanupTempDirectory();
+		if (Cleaned > 0)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[AtlasEditorSubsystem] Cleaned %d temp file(s) on startup"), Cleaned);
+		}
+	}
+
+	// Bind to job completion to check temp storage after each job
+	GetJobManager()->OnJobSavedToHistory.AddDynamic(this, &UAtlasEditorSubsystem::OnJobSavedToHistory);
 }
 
 void UAtlasEditorSubsystem::Deinitialize()
@@ -116,4 +141,23 @@ void UAtlasEditorSubsystem::CancelAllJobs()
 TArray<UAtlasWorkflowAsset*> UAtlasEditorSubsystem::GetAllWorkflowAssets()
 {
 	return GetJobManager()->GetAllWorkflowAssets();
+}
+
+void UAtlasEditorSubsystem::OnJobSavedToHistory(const FAtlasJobHistoryRecord& Record)
+{
+	if (UAtlasTempStorageManager::CheckAndWarnTempStorage())
+	{
+		FString SizeStr = UAtlasTempStorageManager::GetTempDirectorySizeFormatted();
+		const UAtlasSDKSettings* Settings = UAtlasSDKSettings::Get();
+		int32 ThresholdMB = Settings ? Settings->TempStorageWarningMB : 500;
+
+		FString Message = FString::Printf(
+			TEXT("Atlas temp storage is using %s (threshold: %d MB). Consider cleaning up via Project Settings > Atlas SDK."),
+			*SizeStr, ThresholdMB);
+
+		FNotificationInfo Info(FText::FromString(Message));
+		Info.ExpireDuration = 8.0f;
+		Info.bUseLargeFont = false;
+		FSlateNotificationManager::Get().AddNotification(Info);
+	}
 }

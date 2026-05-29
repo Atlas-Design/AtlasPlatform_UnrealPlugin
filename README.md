@@ -289,10 +289,10 @@ The same workflow applies for 3D meshes (GLB/FBX):
 By default, all imported assets are saved to:
 
 ```
-Content/Atlas/Imported/{WorkflowName}/
+Content/Atlas/Imported/{WorkflowName}/{RunFolder}/
 ```
 
-Each workflow gets its own subfolder to keep assets organized:
+Each workflow and run gets its own subfolder to keep imported assets organized:
 
 <p align="center">
   <img src="Docs/Images/JobHistory_ImportedDefaultFolders.png" alt="Default Import Folders" width="60%"/>
@@ -300,7 +300,20 @@ Each workflow gets its own subfolder to keep assets organized:
   <em>Assets are organized by workflow name in Content/Atlas/Imported/</em>
 </p>
 
+Generated files are archived outside the Content Browser in the configured **Output Folder**:
+
+```text
+{OutputFolder}/{WorkflowName}/{RunFolder}/
+  job.json
+  inputs/
+  outputs/
+```
+
+The `inputs/` folder contains copies of file-backed inputs used for the run, `outputs/` contains generated files, and `job.json` stores the run metadata. Use the Job History import buttons to bring generated assets into the Content Browser.
+
 > **Note:** Keep imported assets in this location. The plugin uses this folder to detect which outputs have already been imported, preventing duplicates and allowing you to track import status across editor sessions.
+>
+> **Blueprint migration:** If you maintain Editor Utility Widgets or graphs that manually build old flat output paths, see [`Docs/BlueprintMigrationGuide.md`](Docs/BlueprintMigrationGuide.md).
 
 ---
 
@@ -453,8 +466,8 @@ Access settings via **Edit → Editor Preferences → Plugins → Atlas SDK**
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| **Output Folder** | `{Project}/Saved/Atlas/Output/` | Where downloaded files are saved |
-| **Auto Organize by Type** | Enabled | Sort into Images/ and Meshes/ subfolders |
+| **Output Folder** | `{Project}/Saved/Atlas/Output/` | Root folder for per-workflow, per-run job archives |
+| **Auto Organize by Type** | Enabled | Legacy flat output helper behavior; new job archives store files under each run's `outputs/` folder |
 
 ### Import Settings
 

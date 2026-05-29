@@ -281,6 +281,39 @@ public:
 	UPROPERTY(BlueprintReadWrite, Category = "Atlas|Job")
 	bool bAutoDownloadOutputs = true;
 
+	// ==================== Batch Metadata ====================
+
+	/**
+	 * Batch ID if this job is part of a batch run.
+	 * Empty for standalone (single-run) jobs.
+	 */
+	UPROPERTY(BlueprintReadWrite, Category = "Atlas|Job|Batch")
+	FString BatchId;
+
+	/**
+	 * Row index within the batch (0-based).
+	 * INDEX_NONE (-1) for standalone jobs.
+	 */
+	UPROPERTY(BlueprintReadWrite, Category = "Atlas|Job|Batch")
+	int32 BatchIndex = INDEX_NONE;
+
+	/** Check if this job belongs to a batch */
+	UFUNCTION(BlueprintPure, Category = "Atlas|Job|Batch")
+	bool IsBatchJob() const { return !BatchId.IsEmpty() && BatchIndex != INDEX_NONE; }
+
+	// ==================== Retry Lineage ====================
+
+	/**
+	 * If this job is a retry, stores the JobId of the original (or previous) attempt.
+	 * Invalid GUID for first-attempt jobs.
+	 */
+	UPROPERTY(BlueprintReadWrite, Category = "Atlas|Job|Retry")
+	FGuid RetryOfJobId;
+
+	/** Check if this job is a retry of a previous attempt */
+	UFUNCTION(BlueprintPure, Category = "Atlas|Job|Retry")
+	bool IsRetry() const { return RetryOfJobId.IsValid(); }
+
 	// ==================== User Data (for tracking context in callbacks) ====================
 
 	/**
@@ -328,6 +361,9 @@ protected:
 
 	/** Scan inputs for files that need uploading */
 	void ScanInputsForUploads();
+
+	/** Copy file-backed inputs into this run's inputs/ archive folder before upload */
+	void ArchiveInputFilesToRunFolder();
 
 	/** Start uploading all pending files */
 	void StartUploadPhase();
@@ -437,8 +473,17 @@ private:
 	/** Timer handle for status polling */
 	FTimerHandle StatusPollTimerHandle;
 
-	/** Polling interval in seconds */
-	float PollIntervalSeconds = 2.0f;
+	/** Polling interval in seconds (read from UAtlasSDKSettings on Execute) */
+	float PollIntervalSeconds = 5.0f;
+
+	/** Maximum execution wall-time in seconds; 0 = no limit (read from UAtlasSDKSettings on Execute) */
+	float MaxExecutionTimeSeconds = 900.0f;
+
+	/** Timer handle for execution timeout */
+	FTimerHandle ExecutionTimeoutHandle;
+
+	/** Called when execution exceeds MaxExecutionTimeSeconds */
+	void OnExecutionTimeout();
 
 	// ==================== Upload Tracking ====================
 

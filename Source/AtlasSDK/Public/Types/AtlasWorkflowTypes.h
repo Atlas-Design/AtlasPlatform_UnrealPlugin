@@ -71,6 +71,12 @@ struct ATLASSDK_API FAtlasWorkflowInputs
 		Values.Add(Name, FAtlasValue::MakeMesh(FilePath));
 	}
 
+	/** Set an audio input value from a file path */
+	void SetAudio(const FString& Name, const FString& FilePath)
+	{
+		Values.Add(Name, FAtlasValue::MakeAudio(FilePath));
+	}
+
 	/** Set a JSON input value */
 	void SetJson(const FString& Name, const FString& JsonString)
 	{

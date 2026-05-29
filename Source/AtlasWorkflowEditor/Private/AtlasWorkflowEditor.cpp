@@ -10,78 +10,171 @@
 #include "EditorUtilitySubsystem.h"
 #include "EditorUtilityWidgetBlueprint.h"
 #include "Editor.h"
+#include "Styling/AppStyle.h"
 
 #define LOCTEXT_NAMESPACE "FAtlasWorkflowEditorModule"
 
+// EUW asset paths — update these if you move the widgets
+static const TCHAR* GWorkflowEditorPath = TEXT("/AtlasWorkflow/Core/UI/Editor/EUW_AtlasMain.EUW_AtlasMain");
+static const TCHAR* GBatchEditorPath    = TEXT("/AtlasWorkflow/Core/UI/Editor/EUW_BatchEditor.EUW_BatchEditor");
+static const TCHAR* GJobHistoryPath     = TEXT("/AtlasWorkflow/Core/UI/Editor/EUW_JobHistory.EUW_JobHistory");
+
+// ==================== Module Lifecycle ====================
+
 void FAtlasWorkflowEditorModule::StartupModule()
 {
-    // Register asset type actions
-    IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools").Get();
+	IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools").Get();
 
-    // Register Atlas Workflow Asset actions
-    TSharedPtr<IAssetTypeActions> WorkflowAssetActions = MakeShareable(new FAtlasWorkflowAssetActions());
-    AssetTools.RegisterAssetTypeActions(WorkflowAssetActions.ToSharedRef());
-    RegisteredAssetTypeActions.Add(WorkflowAssetActions);
+	TSharedPtr<IAssetTypeActions> WorkflowAssetActions = MakeShareable(new FAtlasWorkflowAssetActions());
+	AssetTools.RegisterAssetTypeActions(WorkflowAssetActions.ToSharedRef());
+	RegisteredAssetTypeActions.Add(WorkflowAssetActions);
 
-    // Register Window menu extension
-    UToolMenus::RegisterStartupCallback(FSimpleMulticastDelegate::FDelegate::CreateRaw(this, &FAtlasWorkflowEditorModule::RegisterMenus));
+	UToolMenus::RegisterStartupCallback(
+		FSimpleMulticastDelegate::FDelegate::CreateRaw(this, &FAtlasWorkflowEditorModule::RegisterMenus));
 
-    UE_LOG(LogTemp, Log, TEXT("AtlasWorkflowEditor Module has started - Asset type actions registered"));
-}
-
-void FAtlasWorkflowEditorModule::RegisterMenus()
-{
-    FToolMenuOwnerScoped OwnerScoped(this);
-
-    // Extend the Window menu
-    UToolMenu* WindowMenu = UToolMenus::Get()->ExtendMenu("LevelEditor.MainMenu.Window");
-    
-    FToolMenuSection& Section = WindowMenu->FindOrAddSection("AtlasWorkflow");
-    Section.Label = LOCTEXT("AtlasWorkflowSection", "Atlas");
-    
-    Section.AddMenuEntry(
-        "OpenAtlasWorkflow",
-        LOCTEXT("OpenAtlasWorkflow", "Atlas Workflow"),
-        LOCTEXT("OpenAtlasWorkflowTooltip", "Open the Atlas Workflow editor window"),
-        FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.Tabs.Viewports"),
-        FUIAction(FExecuteAction::CreateRaw(this, &FAtlasWorkflowEditorModule::OpenAtlasWorkflowWindow))
-    );
-}
-
-void FAtlasWorkflowEditorModule::OpenAtlasWorkflowWindow()
-{
-    // Path to the Editor Utility Widget Blueprint
-    const FSoftObjectPath WidgetPath(TEXT("/AtlasWorkflow/Core/UI/Editor/EUW_AtlasMain.EUW_AtlasMain"));
-    
-    UObject* LoadedObject = WidgetPath.TryLoad();
-    if (UEditorUtilityWidgetBlueprint* WidgetBlueprint = Cast<UEditorUtilityWidgetBlueprint>(LoadedObject))
-    {
-        if (UEditorUtilitySubsystem* EditorUtilitySubsystem = GEditor->GetEditorSubsystem<UEditorUtilitySubsystem>())
-        {
-            EditorUtilitySubsystem->SpawnAndRegisterTab(WidgetBlueprint);
-        }
-    }
-    else
-    {
-        UE_LOG(LogTemp, Warning, TEXT("Atlas Workflow: Could not find EUW_AtlasMain widget at %s"), *WidgetPath.ToString());
-    }
+	UE_LOG(LogTemp, Log, TEXT("AtlasWorkflowEditor module started"));
 }
 
 void FAtlasWorkflowEditorModule::ShutdownModule()
 {
-    // Unregister asset type actions
-    if (FModuleManager::Get().IsModuleLoaded("AssetTools"))
-    {
-        IAssetTools& AssetTools = FModuleManager::GetModuleChecked<FAssetToolsModule>("AssetTools").Get();
-        for (TSharedPtr<IAssetTypeActions>& Action : RegisteredAssetTypeActions)
-        {
-            if (Action.IsValid())
-            {
-                AssetTools.UnregisterAssetTypeActions(Action.ToSharedRef());
-            }
-        }
-    }
-    RegisteredAssetTypeActions.Empty();
+	if (FModuleManager::Get().IsModuleLoaded("AssetTools"))
+	{
+		IAssetTools& AssetTools = FModuleManager::GetModuleChecked<FAssetToolsModule>("AssetTools").Get();
+		for (TSharedPtr<IAssetTypeActions>& Action : RegisteredAssetTypeActions)
+		{
+			if (Action.IsValid())
+			{
+				AssetTools.UnregisterAssetTypeActions(Action.ToSharedRef());
+			}
+		}
+	}
+	RegisteredAssetTypeActions.Empty();
+
+	UToolMenus::UnregisterOwner(this);
+}
+
+// ==================== Menu Registration ====================
+
+void FAtlasWorkflowEditorModule::RegisterMenus()
+{
+	FToolMenuOwnerScoped OwnerScoped(this);
+
+	// --- Toolbar combo button ---
+	UToolMenu* ToolbarMenu = UToolMenus::Get()->ExtendMenu("LevelEditor.LevelEditorToolBar.PlayToolBar");
+	FToolMenuSection& ToolbarSection = ToolbarMenu->FindOrAddSection("Atlas");
+
+	FToolMenuEntry SubMenuEntry = FToolMenuEntry::InitSubMenu(
+		"AtlasToolbar",
+		LOCTEXT("AtlasToolbarLabel", "Atlas"),
+		LOCTEXT("AtlasToolbarTooltip", "Atlas Platform tools — workflow editor, batch processing, job history"),
+		FNewToolMenuDelegate::CreateStatic(&FAtlasWorkflowEditorModule::BuildAtlasToolbarMenu),
+		false,
+		FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.GameSettings")
+	);
+	SubMenuEntry.StyleNameOverride = "CalloutToolbar";
+	ToolbarSection.AddEntry(SubMenuEntry);
+
+	// --- Window > Atlas submenu (secondary access) ---
+	UToolMenu* WindowMenu = UToolMenus::Get()->ExtendMenu("LevelEditor.MainMenu.Window");
+	FToolMenuSection& WindowSection = WindowMenu->FindOrAddSection("AtlasWorkflow");
+	WindowSection.Label = LOCTEXT("AtlasWindowSection", "Atlas");
+
+	WindowSection.AddMenuEntry(
+		"OpenWorkflowEditor",
+		LOCTEXT("WindowWorkflowEditor", "Workflow Editor"),
+		LOCTEXT("WindowWorkflowEditorTip", "Open the single workflow editor"),
+		FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.GameSettings"),
+		FUIAction(FExecuteAction::CreateRaw(this, &FAtlasWorkflowEditorModule::OpenWorkflowEditor))
+	);
+
+	WindowSection.AddMenuEntry(
+		"OpenBatchEditor",
+		LOCTEXT("WindowBatchEditor", "Batch Editor"),
+		LOCTEXT("WindowBatchEditorTip", "Open the batch workflow editor"),
+		FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.GameSettings"),
+		FUIAction(FExecuteAction::CreateRaw(this, &FAtlasWorkflowEditorModule::OpenBatchEditor))
+	);
+
+	WindowSection.AddMenuEntry(
+		"OpenJobHistory",
+		LOCTEXT("WindowJobHistory", "Job History"),
+		LOCTEXT("WindowJobHistoryTip", "Open the job history viewer"),
+		FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.GameSettings"),
+		FUIAction(FExecuteAction::CreateRaw(this, &FAtlasWorkflowEditorModule::OpenJobHistory))
+	);
+}
+
+void FAtlasWorkflowEditorModule::BuildAtlasToolbarMenu(UToolMenu* Menu)
+{
+	FToolMenuSection& Section = Menu->FindOrAddSection("AtlasTools");
+
+	Section.AddMenuEntry(
+		"WorkflowEditor",
+		LOCTEXT("ToolbarWorkflowEditor", "Workflow Editor"),
+		LOCTEXT("ToolbarWorkflowEditorTip", "Run a single workflow with full parameter editing"),
+		FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.GameSettings"),
+		FUIAction(FExecuteAction::CreateLambda([]()
+		{
+			FModuleManager::GetModuleChecked<FAtlasWorkflowEditorModule>("AtlasWorkflowEditor").OpenWorkflowEditor();
+		}))
+	);
+
+	Section.AddMenuEntry(
+		"BatchEditor",
+		LOCTEXT("ToolbarBatchEditor", "Batch Editor"),
+		LOCTEXT("ToolbarBatchEditorTip", "Run multiple workflow variations as a batch"),
+		FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.GameSettings"),
+		FUIAction(FExecuteAction::CreateLambda([]()
+		{
+			FModuleManager::GetModuleChecked<FAtlasWorkflowEditorModule>("AtlasWorkflowEditor").OpenBatchEditor();
+		}))
+	);
+
+	Section.AddMenuEntry(
+		"JobHistory",
+		LOCTEXT("ToolbarJobHistory", "Job History"),
+		LOCTEXT("ToolbarJobHistoryTip", "View running jobs, history, and batch results"),
+		FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.GameSettings"),
+		FUIAction(FExecuteAction::CreateLambda([]()
+		{
+			FModuleManager::GetModuleChecked<FAtlasWorkflowEditorModule>("AtlasWorkflowEditor").OpenJobHistory();
+		}))
+	);
+}
+
+// ==================== EUW Launchers ====================
+
+void FAtlasWorkflowEditorModule::OpenEditorUtilityWidget(const FString& WidgetAssetPath)
+{
+	const FSoftObjectPath WidgetPath(WidgetAssetPath);
+	UObject* LoadedObject = WidgetPath.TryLoad();
+
+	if (UEditorUtilityWidgetBlueprint* WidgetBlueprint = Cast<UEditorUtilityWidgetBlueprint>(LoadedObject))
+	{
+		if (UEditorUtilitySubsystem* Subsystem = GEditor->GetEditorSubsystem<UEditorUtilitySubsystem>())
+		{
+			Subsystem->SpawnAndRegisterTab(WidgetBlueprint);
+		}
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("Atlas: Could not load EUW at %s"), *WidgetAssetPath);
+	}
+}
+
+void FAtlasWorkflowEditorModule::OpenWorkflowEditor()
+{
+	OpenEditorUtilityWidget(GWorkflowEditorPath);
+}
+
+void FAtlasWorkflowEditorModule::OpenBatchEditor()
+{
+	OpenEditorUtilityWidget(GBatchEditorPath);
+}
+
+void FAtlasWorkflowEditorModule::OpenJobHistory()
+{
+	OpenEditorUtilityWidget(GJobHistoryPath);
 }
 
 #undef LOCTEXT_NAMESPACE

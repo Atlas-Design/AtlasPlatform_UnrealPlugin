@@ -10,6 +10,7 @@
 #include "Types/AtlasErrorTypes.h"
 #include "Types/AtlasJobTypes.h"
 #include "Types/AtlasHistoryTypes.h"
+#include "Types/AtlasBatchTypes.h"
 #include "AtlasSDKLibrary.generated.h"
 
 /**
@@ -57,6 +58,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Atlas|Value", meta = (DisplayName = "Make Mesh Value"))
 	static FAtlasValue MakeMeshValue(const FString& FilePath);
 
+	/** Create an audio input value from a file path */
+	UFUNCTION(BlueprintPure, Category = "Atlas|Value", meta = (DisplayName = "Make Audio Value"))
+	static FAtlasValue MakeAudioValue(const FString& FilePath);
+
 	/** Create a JSON value from a JSON string */
 	UFUNCTION(BlueprintPure, Category = "Atlas|Value", meta = (DisplayName = "Make JSON Value"))
 	static FAtlasValue MakeJsonValue(const FString& JsonString);
@@ -95,7 +100,7 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Atlas|Value", meta = (DisplayName = "Get File Path"))
 	static FString GetFilePathFromValue(const FAtlasValue& Value);
 
-	/** Check if value is a file type (File, Image, or Mesh) */
+	/** Check if value is a file type (File, Image, Mesh, or Audio) */
 	UFUNCTION(BlueprintPure, Category = "Atlas|Value", meta = (DisplayName = "Is File Type"))
 	static bool IsFileType(const FAtlasValue& Value);
 
@@ -144,6 +149,10 @@ public:
 	/** Set a mesh input from a file path */
 	UFUNCTION(BlueprintCallable, Category = "Atlas|Inputs", meta = (DisplayName = "Set Mesh Input"))
 	static void SetMeshInput(UPARAM(ref) FAtlasWorkflowInputs& Inputs, const FString& Name, const FString& FilePath);
+
+	/** Set an audio input from a file path */
+	UFUNCTION(BlueprintCallable, Category = "Atlas|Inputs", meta = (DisplayName = "Set Audio Input"))
+	static void SetAudioInput(UPARAM(ref) FAtlasWorkflowInputs& Inputs, const FString& Name, const FString& FilePath);
 
 	/** Set a JSON input */
 	UFUNCTION(BlueprintCallable, Category = "Atlas|Inputs", meta = (DisplayName = "Set JSON Input"))
@@ -395,4 +404,50 @@ public:
 	/** Clear all filters from a query */
 	UFUNCTION(BlueprintCallable, Category = "Atlas|History", meta = (DisplayName = "Clear Query Filters"))
 	static void ClearQueryFilters(UPARAM(ref) FAtlasHistoryQuery& Query);
+
+	// ==================== Batch Helpers ====================
+
+	/** Get the progress fraction (0.0–1.0) from a batch progress struct */
+	UFUNCTION(BlueprintPure, Category = "Atlas|Batch", meta = (DisplayName = "Get Batch Progress Fraction"))
+	static float GetBatchProgressFraction(const FAtlasBatchProgress& Progress);
+
+	/** Check if a batch is complete (no pending or running rows) */
+	UFUNCTION(BlueprintPure, Category = "Atlas|Batch", meta = (DisplayName = "Is Batch Complete"))
+	static bool IsBatchComplete(const FAtlasBatchProgress& Progress);
+
+	/** Format a batch status string: "3/5 Succeeded • 1 Failed • 1 Running" */
+	UFUNCTION(BlueprintPure, Category = "Atlas|Batch", meta = (DisplayName = "Format Batch Status"))
+	static FString FormatBatchStatus(const FAtlasBatchProgress& Progress);
+
+	/** Get the status of a specific row in a batch definition */
+	UFUNCTION(BlueprintPure, Category = "Atlas|Batch", meta = (DisplayName = "Get Batch Row Status"))
+	static EAtlasBatchRowStatus GetBatchRowStatus(const FAtlasBatchDefinition& Batch, int32 RowIndex);
+
+	/** Convert batch row status to display string */
+	UFUNCTION(BlueprintPure, Category = "Atlas|Batch", meta = (DisplayName = "Batch Row Status To String"))
+	static FString BatchRowStatusToString(EAtlasBatchRowStatus Status);
+
+	/** Check if a batch row status is terminal (Succeeded, Failed, Cancelled) */
+	UFUNCTION(BlueprintPure, Category = "Atlas|Batch", meta = (DisplayName = "Is Batch Row Terminal"))
+	static bool IsBatchRowTerminal(EAtlasBatchRowStatus Status);
+
+	/** Get row count from a batch definition */
+	UFUNCTION(BlueprintPure, Category = "Atlas|Batch", meta = (DisplayName = "Get Batch Row Count"))
+	static int32 GetBatchRowCount(const FAtlasBatchDefinition& Batch);
+
+	/** Get a row from a batch definition by index */
+	UFUNCTION(BlueprintPure, Category = "Atlas|Batch", meta = (DisplayName = "Get Batch Row"))
+	static bool GetBatchRow(const FAtlasBatchDefinition& Batch, int32 RowIndex, FAtlasBatchRow& OutRow);
+
+	/** Check if a batch summary is complete (all rows terminal) */
+	UFUNCTION(BlueprintPure, Category = "Atlas|Batch", meta = (DisplayName = "Is Batch Summary Complete"))
+	static bool IsBatchSummaryComplete(const FAtlasBatchSummary& Summary);
+
+	/** Check if a history record is a retry of another job */
+	UFUNCTION(BlueprintPure, Category = "Atlas|History", meta = (DisplayName = "Is Retry"))
+	static bool IsHistoryRecordRetry(const FAtlasJobHistoryRecord& Record);
+
+	/** Check if a history record is part of a batch */
+	UFUNCTION(BlueprintPure, Category = "Atlas|History", meta = (DisplayName = "Is Batch Job"))
+	static bool IsHistoryRecordBatchJob(const FAtlasJobHistoryRecord& Record);
 };

@@ -57,6 +57,10 @@ struct ATLASSDK_API FAtlasParameterDef
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Atlas|Schema")
 	TArray<FString> AllowedExtensions;
 
+	/** File format hint from schema (e.g., "mp3", "wav") - used for audio/file outputs */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Atlas|Schema")
+	FString Format;
+
 	// ==================== Helper Methods (C++) ====================
 
 	/** Get the display name, falling back to Name if DisplayName is empty */
@@ -71,12 +75,13 @@ struct ATLASSDK_API FAtlasParameterDef
 		return Options.Num() > 0;
 	}
 
-	/** Check if this is a file-type parameter (File, Image, or Mesh) */
+	/** Check if this is a file-type parameter (File, Image, Mesh, or Audio) */
 	bool IsFileType() const
 	{
 		return Type == EAtlasValueType::File || 
 		       Type == EAtlasValueType::Image || 
-		       Type == EAtlasValueType::Mesh;
+		       Type == EAtlasValueType::Mesh ||
+		       Type == EAtlasValueType::Audio;
 	}
 
 	/** 

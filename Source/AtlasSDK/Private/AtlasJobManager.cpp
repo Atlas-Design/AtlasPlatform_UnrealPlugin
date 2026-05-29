@@ -5,6 +5,8 @@
 #include "AtlasFileManager.h"
 #include "AtlasHistoryManager.h"
 #include "AtlasOutputManager.h"
+#include "AtlasBatchOrchestrator.h"
+#include "AtlasBatchPersistence.h"
 #include "AtlasSDKSettings.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 
@@ -56,9 +58,6 @@ void UAtlasJobManager::AutoSaveJobOutputs(UAtlasJob* Job)
 
 	CreateOutputManagerIfNeeded();
 
-	// Get a short unique ID from the job (first 8 chars of GUID)
-	FString JobIdShort = Job->JobId.ToString(EGuidFormats::DigitsWithHyphens).Left(8);
-
 	// Iterate through outputs and save file types
 	for (auto& Pair : Job->Outputs.Values)
 	{
@@ -73,42 +72,38 @@ void UAtlasJobManager::AutoSaveJobOutputs(UAtlasJob* Job)
 
 		// Determine file extension from type
 		FString Extension;
-		FString SubFolder;
-		switch (OutputValue.Type)
+		if (!OutputValue.FileName.IsEmpty())
 		{
-		case EAtlasValueType::Image:
-			Extension = TEXT(".png");
-			SubFolder = TEXT("Images");
-			break;
-		case EAtlasValueType::Mesh:
-			Extension = TEXT(".glb");
-			SubFolder = TEXT("Meshes");
-			break;
-		case EAtlasValueType::File:
-			Extension = TEXT(".bin");
-			SubFolder = TEXT("");
-			break;
-		default:
-			continue; // Skip non-file types
+			Extension = FPaths::GetExtension(OutputValue.FileName, true);
 		}
 
-		// Create unique filename: {OutputName}_{JobIdShort}{Extension}
-		FString FileName = FString::Printf(TEXT("%s_%s%s"), *OutputName, *JobIdShort, *Extension);
+		if (Extension.IsEmpty())
+		{
+			switch (OutputValue.Type)
+			{
+			case EAtlasValueType::Image:
+				Extension = TEXT(".png");
+				break;
+			case EAtlasValueType::Mesh:
+				Extension = TEXT(".glb");
+				break;
+			case EAtlasValueType::Audio:
+				Extension = TEXT(".mp3");
+				break;
+			case EAtlasValueType::File:
+				Extension = TEXT(".bin");
+				break;
+			default:
+				continue; // Skip non-file types
+			}
+		}
+
+		// Create deterministic filename: Output_{OutputName}{Extension}
+		const FString SafeOutputName = UAtlasOutputManager::SanitizeParameterName(OutputName);
+		FString FileName = FString::Printf(TEXT("Output_%s%s"), *SafeOutputName, *Extension);
 		
-		// Save the file
-		FAtlasSaveResult SaveResult;
-		if (OutputValue.Type == EAtlasValueType::Image)
-		{
-			SaveResult = OutputManager->SaveImageToOutputFolder(OutputValue.FileData, FileName);
-		}
-		else if (OutputValue.Type == EAtlasValueType::Mesh)
-		{
-			SaveResult = OutputManager->SaveMeshToOutputFolder(OutputValue.FileData, FileName);
-		}
-		else
-		{
-			SaveResult = OutputManager->SaveToOutputFolder(OutputValue.FileData, FileName);
-		}
+		// Save the file into the run's outputs/ folder.
+		FAtlasSaveResult SaveResult = OutputManager->SaveToJobOutputFolder(Job, OutputValue.FileData, FileName);
 
 		if (SaveResult.bSuccess)
 		{
@@ -307,6 +302,36 @@ bool UAtlasJobManager::RemoveJob(UAtlasJob* Job)
 	return RemovedCount > 0;
 }
 
+// ==================== Batch Execution ====================
+
+TArray<UAtlasJob*> UAtlasJobManager::GetJobsByBatchId(const FString& InBatchId) const
+{
+	TArray<UAtlasJob*> Result;
+	for (const TObjectPtr<UAtlasJob>& Job : ActiveJobs)
+	{
+		if (IsValid(Job) && Job->BatchId == InBatchId)
+		{
+			Result.Add(Job);
+		}
+	}
+	return Result;
+}
+
+UAtlasBatchOrchestrator* UAtlasJobManager::CreateBatchOrchestrator()
+{
+	UAtlasBatchOrchestrator* Orchestrator = NewObject<UAtlasBatchOrchestrator>(this);
+	ActiveOrchestrators.Add(Orchestrator);
+
+	// Clean up finished orchestrators while we're here
+	ActiveOrchestrators.RemoveAll([](const TObjectPtr<UAtlasBatchOrchestrator>& Orch)
+	{
+		return !IsValid(Orch) || !Orch->IsRunning();
+	});
+
+	UE_LOG(LogTemp, Log, TEXT("AtlasJobManager: Created batch orchestrator (active: %d)"), ActiveOrchestrators.Num());
+	return Orchestrator;
+}
+
 // ==================== Configuration ====================
 
 void UAtlasJobManager::SetFileManager(UAtlasFileManager* InFileManager)
@@ -417,6 +442,47 @@ UAtlasJob* UAtlasJobManager::RerunFromHistory(const FAtlasJobHistoryRecord& Reco
 	}
 }
 
+UAtlasJob* UAtlasJobManager::RetryJob(const FAtlasJobHistoryRecord& Record, bool bPreserveBatch)
+{
+	if (!Record.IsValid())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("AtlasJobManager: Cannot retry from invalid history record"));
+		return nullptr;
+	}
+
+	// Create the new job via the existing rerun path
+	UAtlasJob* NewJob = RerunFromHistory(Record);
+	if (!NewJob)
+	{
+		return nullptr;
+	}
+
+	// Set retry lineage
+	NewJob->RetryOfJobId = Record.JobId;
+
+	// Optionally preserve batch metadata
+	if (bPreserveBatch && Record.IsBatchJob())
+	{
+		NewJob->BatchId = Record.BatchId;
+		NewJob->BatchIndex = Record.BatchIndex;
+
+		// Update the manifest so it points to the new job for this row
+		UAtlasBatchPersistence::UpdateManifestRow(
+			Record.BatchId,
+			Record.BatchIndex,
+			NewJob->JobId,
+			EAtlasBatchRowStatus::Pending
+		);
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("AtlasJobManager: Retry job created (original: %s, new: %s, preserveBatch: %s)"),
+		*Record.JobId.ToString(EGuidFormats::DigitsWithHyphens),
+		*NewJob->JobId.ToString(EGuidFormats::DigitsWithHyphens),
+		bPreserveBatch ? TEXT("true") : TEXT("false"));
+
+	return NewJob;
+}
+
 // ==================== Event Handling ====================
 
 void UAtlasJobManager::OnJobStateChanged(UAtlasJob* Job, EAtlasJobState NewState)
@@ -424,6 +490,27 @@ void UAtlasJobManager::OnJobStateChanged(UAtlasJob* Job, EAtlasJobState NewState
 	if (!IsValid(Job))
 	{
 		return;
+	}
+
+	// Save a Running record so crash recovery (ReconcileStaleJobs) can detect it
+	if (NewState == EAtlasJobState::Running)
+	{
+		CreateHistoryManagerIfNeeded();
+		FAtlasJobHistoryRecord RunningRecord;
+		RunningRecord.JobId = Job->JobId;
+		RunningRecord.ApiId = Job->ApiId;
+		RunningRecord.WorkflowName = Job->WorkflowName;
+		RunningRecord.StartedAt = Job->StartedAt;
+		RunningRecord.Status = EAtlasJobStatus::Running;
+		RunningRecord.BatchId = Job->BatchId;
+		RunningRecord.BatchIndex = Job->BatchIndex;
+		RunningRecord.RetryOfJobId = Job->RetryOfJobId;
+		RunningRecord.Inputs = Job->Inputs;
+		for (auto& Pair : RunningRecord.Inputs.Values)
+		{
+			Pair.Value.FileData.Empty();
+		}
+		HistoryManager->SaveRecord(RunningRecord);
 	}
 
 	// Auto-remove completed jobs from active list and save to history

@@ -12,6 +12,8 @@ class UAtlasWorkflowAsset;
 class UAtlasFileManager;
 class UAtlasHistoryManager;
 class UAtlasOutputManager;
+class UAtlasBatchOrchestrator;
+struct FAtlasBatchDefinition;
 
 /** Delegate fired when a new job is created and added to active jobs */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnAtlasJobCreated, UAtlasJob*, Job);
@@ -142,6 +144,24 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Atlas|JobManager")
 	TArray<UAtlasWorkflowAsset*> GetAllWorkflowAssets() const;
 
+	// ==================== Batch Execution ====================
+
+	/**
+	 * Get all active jobs belonging to a specific batch.
+	 * @param InBatchId The batch ID to filter by
+	 * @return Array of active jobs in that batch
+	 */
+	UFUNCTION(BlueprintPure, Category = "Atlas|JobManager|Batch")
+	TArray<UAtlasJob*> GetJobsByBatchId(const FString& InBatchId) const;
+
+	/**
+	 * Create a new batch orchestrator.
+	 * The orchestrator is owned by this manager (GC-safe).
+	 * @return A new batch orchestrator instance
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Atlas|JobManager|Batch")
+	UAtlasBatchOrchestrator* CreateBatchOrchestrator();
+
 	// ==================== Configuration ====================
 
 	/**
@@ -210,6 +230,17 @@ public:
 	UAtlasJob* RerunFromHistory(const FAtlasJobHistoryRecord& Record);
 
 	/**
+	 * Retry a failed/cancelled job from history with lineage tracking.
+	 * Creates a new job with the same inputs, sets RetryOfJobId for lineage,
+	 * and optionally preserves batch metadata so the manifest stays consistent.
+	 * @param Record The history record to retry
+	 * @param bPreserveBatch If true, copies BatchId/BatchIndex and updates the manifest
+	 * @return The new job, or nullptr if inputs couldn't be restored
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Atlas|JobManager|History")
+	UAtlasJob* RetryJob(const FAtlasJobHistoryRecord& Record, bool bPreserveBatch = true);
+
+	/**
 	 * Get the HistoryManager for direct access.
 	 * @return The HistoryManager instance
 	 */
@@ -268,6 +299,10 @@ private:
 	/** Output manager for saving files to disk */
 	UPROPERTY()
 	TObjectPtr<UAtlasOutputManager> OutputManager;
+
+	/** Active batch orchestrators (GC protection) */
+	UPROPERTY()
+	TArray<TObjectPtr<UAtlasBatchOrchestrator>> ActiveOrchestrators;
 
 	/** Create history manager if needed */
 	void CreateHistoryManagerIfNeeded();

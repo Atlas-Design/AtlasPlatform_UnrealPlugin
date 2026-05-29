@@ -84,7 +84,7 @@ public:
 	/**
 	 * Status polling interval in seconds during async execution.
 	 * Lower values = more responsive but more API calls.
-	 * Default: 2 seconds
+	 * Default: 5 seconds
 	 */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Execution", meta = (ClampMin = "0.5", ClampMax = "30"))
 	float StatusPollIntervalSeconds;
@@ -92,7 +92,7 @@ public:
 	/**
 	 * Maximum time to wait for job completion in seconds.
 	 * Jobs taking longer than this will be considered timed out.
-	 * Default: 600 seconds (10 minutes)
+	 * Default: 900 seconds (15 minutes)
 	 */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Execution", meta = (ClampMin = "30", ClampMax = "3600"))
 	float MaxExecutionTimeSeconds;
@@ -135,12 +135,39 @@ public:
 	int32 MaxHistoryRecordsPerWorkflow;
 
 	/**
+	 * History records stuck in Running status longer than this threshold
+	 * are automatically marked Failed on editor startup.
+	 * Default: 48 hours
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "History", meta = (ClampMin = "1", ClampMax = "720"))
+	int32 StaleJobThresholdHours;
+
+	/**
 	 * Automatically save output files when job completes.
 	 * If disabled, outputs remain as in-memory bytes until explicitly saved.
 	 * Default: true
 	 */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "History")
 	bool bAutoSaveOutputFiles;
+
+	// ==================== Temp Storage Settings ====================
+
+	/**
+	 * Warning threshold for temp directory size in megabytes.
+	 * A notification is shown if the total size of Saved/Atlas/Temp*
+	 * directories exceeds this value after a job completes.
+	 * Default: 500 MB
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Temp Storage", meta = (ClampMin = "10", ClampMax = "10000"))
+	int32 TempStorageWarningMB;
+
+	/**
+	 * Automatically clean up temp directories on editor startup.
+	 * Removes contents of TempExports and TempImports folders.
+	 * Default: true
+	 */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Temp Storage")
+	bool bCleanTempOnEditorStart;
 
 	// ==================== Helpers ====================
 

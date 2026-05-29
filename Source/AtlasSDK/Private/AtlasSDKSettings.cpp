@@ -22,9 +22,9 @@ UAtlasSDKSettings::UAtlasSDKSettings()
 	bCompressImportedTextures = false;
 
 	// Execution settings
-	RequestTimeoutSeconds = 120.0f;      // 2 minutes
-	StatusPollIntervalSeconds = 2.0f;    // Poll every 2 seconds
-	MaxExecutionTimeSeconds = 600.0f;    // 10 minutes max
+	RequestTimeoutSeconds = 120.0f;      // 2 minutes per HTTP request
+	StatusPollIntervalSeconds = 5.0f;    // Poll every 5 seconds
+	MaxExecutionTimeSeconds = 900.0f;    // 15 minutes max
 
 	// Cache settings
 	bEnableUploadCache = true;
@@ -33,7 +33,12 @@ UAtlasSDKSettings::UAtlasSDKSettings()
 
 	// History settings
 	MaxHistoryRecordsPerWorkflow = 100;
+	StaleJobThresholdHours = 48;
 	bAutoSaveOutputFiles = true;
+
+	// Temp storage settings
+	TempStorageWarningMB = 500;
+	bCleanTempOnEditorStart = true;
 }
 
 FString UAtlasSDKSettings::GetOutputFolderPath() const

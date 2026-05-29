@@ -39,6 +39,9 @@ enum class EAtlasValueType : uint8
 	/** 3D mesh file */
 	Mesh UMETA(DisplayName = "Mesh"),
 	
+	/** Audio file (MP3, WAV, OGG, etc.) */
+	Audio UMETA(DisplayName = "Audio"),
+	
 	/** JSON object or array */
 	Json UMETA(DisplayName = "JSON")
 };
@@ -213,6 +216,16 @@ struct ATLASSDK_API FAtlasValue
 		return Result;
 	}
 
+	/** Create an audio input value from a file path (for workflow inputs) */
+	static FAtlasValue MakeAudio(const FString& InFilePath)
+	{
+		FAtlasValue Result;
+		Result.Type = EAtlasValueType::Audio;
+		Result.FilePath = InFilePath;
+		Result.FileName = FPaths::GetCleanFilename(InFilePath);
+		return Result;
+	}
+
 	// ==================== Output Factory Methods (for API responses) ====================
 
 	/** Create an image output value from byte data (used when receiving API results) */
@@ -240,6 +253,16 @@ struct ATLASSDK_API FAtlasValue
 	{
 		FAtlasValue Result;
 		Result.Type = EAtlasValueType::File;
+		Result.FileData = Bytes;
+		Result.FileName = InFileName;
+		return Result;
+	}
+
+	/** Create an audio output value from byte data (used when receiving API results) */
+	static FAtlasValue MakeAudioFromBytes(const TArray<uint8>& Bytes, const FString& InFileName)
+	{
+		FAtlasValue Result;
+		Result.Type = EAtlasValueType::Audio;
 		Result.FileData = Bytes;
 		Result.FileName = InFileName;
 		return Result;
@@ -274,11 +297,14 @@ struct ATLASSDK_API FAtlasValue
 	/** Check if this value is a boolean */
 	bool IsBool() const { return Type == EAtlasValueType::Boolean; }
 
-	/** Check if this is a file-type value (File, Image, or Mesh) */
+	/** Check if this is a file-type value (File, Image, Mesh, or Audio) */
 	bool IsFileType() const
 	{
-		return Type == EAtlasValueType::File || Type == EAtlasValueType::Image || Type == EAtlasValueType::Mesh;
+		return Type == EAtlasValueType::File || Type == EAtlasValueType::Image || Type == EAtlasValueType::Mesh || Type == EAtlasValueType::Audio;
 	}
+
+	/** Check if this value is an audio file */
+	bool IsAudio() const { return Type == EAtlasValueType::Audio; }
 
 	/** Check if this file-type value has a file path set (for inputs) */
 	bool HasFilePath() const
@@ -360,6 +386,7 @@ struct ATLASSDK_API FAtlasValue
 		case EAtlasValueType::File:
 		case EAtlasValueType::Image:
 		case EAtlasValueType::Mesh:
+		case EAtlasValueType::Audio:
 			if (!FilePath.IsEmpty())
 			{
 				return FString::Printf(TEXT("[%s: %s]"), 

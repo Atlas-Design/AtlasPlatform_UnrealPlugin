@@ -49,6 +49,10 @@ FAtlasSaveResult UAtlasOutputManager::SaveToOutputFolder(const TArray<uint8>& By
 		{
 			TargetFolder = GetMeshesFolder();
 		}
+		else if (Category == EAtlasFileCategory::Audio)
+		{
+			TargetFolder = GetAudioFolder();
+		}
 	}
 
 	FString FullPath = FPaths::Combine(TargetFolder, FileName);
@@ -74,9 +78,20 @@ FAtlasSaveResult UAtlasOutputManager::SaveMeshToOutputFolder(const TArray<uint8>
 	return SaveBytesToPath(Bytes, FullPath);
 }
 
+FAtlasSaveResult UAtlasOutputManager::SaveAudioToOutputFolder(const TArray<uint8>& Bytes, const FString& FileName)
+{
+	FString FullPath = FPaths::Combine(GetAudioFolder(), FileName);
+	return SaveBytesToPath(Bytes, FullPath);
+}
+
 // ==================== Job-Based Output Saving ====================
 
 FAtlasSaveResult UAtlasOutputManager::SaveToJobFolder(UAtlasJob* Job, const TArray<uint8>& Bytes, const FString& FileName)
+{
+	return SaveToJobOutputFolder(Job, Bytes, FileName);
+}
+
+FAtlasSaveResult UAtlasOutputManager::SaveToJobOutputFolder(UAtlasJob* Job, const TArray<uint8>& Bytes, const FString& FileName)
 {
 	FAtlasSaveResult Result;
 	
@@ -102,8 +117,8 @@ FAtlasSaveResult UAtlasOutputManager::SaveToJobFolder(UAtlasJob* Job, const TArr
 		return Result;
 	}
 	
-	FString FullPath = FPaths::Combine(FolderInfo.DiskPath, FileName);
-	UE_LOG(LogTemp, Log, TEXT("AtlasOutputManager: Saving output file to job folder: %s"), *FullPath);
+	FString FullPath = FPaths::Combine(FolderInfo.OutputsDiskPath, FileName);
+	UE_LOG(LogTemp, Log, TEXT("AtlasOutputManager: Saving output file to job outputs folder: %s"), *FullPath);
 	
 	return SaveBytesToPath(Bytes, FullPath);
 }
@@ -127,7 +142,7 @@ FString UAtlasOutputManager::GetOutputFilePathForJob(UAtlasJob* Job, const FStri
 		return FString();
 	}
 	
-	return FPaths::Combine(FolderInfo.DiskPath, FileName);
+	return FPaths::Combine(FolderInfo.OutputsDiskPath, FileName);
 }
 
 TArray<FString> UAtlasOutputManager::GetAllOutputFilesForJob(UAtlasJob* Job) const
@@ -145,19 +160,19 @@ TArray<FString> UAtlasOutputManager::GetAllOutputFilesForJob(UAtlasJob* Job) con
 		return Results;
 	}
 	
-	if (!FPaths::DirectoryExists(FolderInfo.DiskPath))
+	if (!FPaths::DirectoryExists(FolderInfo.OutputsDiskPath))
 	{
 		return Results;
 	}
 	
-	// Find all files in the job folder
-	FString SearchPath = FPaths::Combine(FolderInfo.DiskPath, TEXT("*"));
+	// Find all files in the job outputs folder
+	FString SearchPath = FPaths::Combine(FolderInfo.OutputsDiskPath, TEXT("*"));
 	IFileManager::Get().FindFiles(Results, *SearchPath, true, false);
 	
 	// Convert to full paths
 	for (FString& FileName : Results)
 	{
-		FileName = FPaths::Combine(FolderInfo.DiskPath, FileName);
+		FileName = FPaths::Combine(FolderInfo.OutputsDiskPath, FileName);
 	}
 	
 	return Results;
@@ -177,21 +192,61 @@ FString UAtlasOutputManager::GetOutputFilePathForJobFromHistory(const FAtlasJobH
 	{
 		return FString();
 	}
-	
-	// First check if we have a saved path in OutputFilePaths
+
+	TArray<FString> CandidatePaths;
+	TArray<FString> CandidateFileNames;
+	CandidateFileNames.AddUnique(FileName);
+
+	// OutputFilePaths is keyed by output parameter name. Keep supporting callers
+	// that pass either the output name or the generated filename.
 	if (const FString* SavedPath = HistoryRecord.OutputFilePaths.Find(FileName))
 	{
-		return *SavedPath;
+		CandidatePaths.AddUnique(*SavedPath);
+		CandidateFileNames.AddUnique(FPaths::GetCleanFilename(*SavedPath));
 	}
-	
-	// Otherwise compute from folder info
-	FAtlasJobFolderInfo FolderInfo = GetJobFolderInfoFromHistory(HistoryRecord);
-	if (!FolderInfo.IsValid())
+
+	FAtlasValue OutputValue;
+	if (HistoryRecord.Outputs.GetValue(FileName, OutputValue))
 	{
-		return FString();
+		if (!OutputValue.FilePath.IsEmpty())
+		{
+			CandidatePaths.AddUnique(OutputValue.FilePath);
+		}
+		if (!OutputValue.FileName.IsEmpty())
+		{
+			CandidateFileNames.AddUnique(OutputValue.FileName);
+		}
 	}
-	
-	return FPaths::Combine(FolderInfo.DiskPath, FileName);
+
+	for (const auto& Pair : HistoryRecord.OutputFilePaths)
+	{
+		if (Pair.Key == FileName || FPaths::GetCleanFilename(Pair.Value) == FileName)
+		{
+			CandidatePaths.AddUnique(Pair.Value);
+		}
+	}
+
+	FAtlasJobFolderInfo FolderInfo = GetJobFolderInfoFromHistory(HistoryRecord);
+	if (FolderInfo.IsValid())
+	{
+		for (const FString& CandidateFileName : CandidateFileNames)
+		{
+			if (!CandidateFileName.IsEmpty())
+			{
+				CandidatePaths.AddUnique(FPaths::Combine(FolderInfo.OutputsDiskPath, CandidateFileName));
+			}
+		}
+	}
+
+	for (const FString& CandidatePath : CandidatePaths)
+	{
+		if (FPaths::FileExists(CandidatePath))
+		{
+			return CandidatePath;
+		}
+	}
+
+	return CandidatePaths.Num() > 0 ? CandidatePaths[0] : FString();
 }
 
 TArray<FString> UAtlasOutputManager::GetAllOutputFilesForJobFromHistory(const FAtlasJobHistoryRecord& HistoryRecord) const
@@ -203,26 +258,39 @@ TArray<FString> UAtlasOutputManager::GetAllOutputFilesForJobFromHistory(const FA
 		return Results;
 	}
 	
+	TSet<FString> UniquePaths;
+
+	for (const auto& Pair : HistoryRecord.OutputFilePaths)
+	{
+		if (!Pair.Value.IsEmpty())
+		{
+			UniquePaths.Add(Pair.Value);
+		}
+	}
+
+	for (const auto& Pair : HistoryRecord.Outputs.Values)
+	{
+		const FAtlasValue& OutputValue = Pair.Value;
+		if (!OutputValue.FilePath.IsEmpty())
+		{
+			UniquePaths.Add(OutputValue.FilePath);
+		}
+	}
+
 	FAtlasJobFolderInfo FolderInfo = GetJobFolderInfoFromHistory(HistoryRecord);
-	if (!FolderInfo.IsValid())
+	if (FolderInfo.IsValid() && FPaths::DirectoryExists(FolderInfo.OutputsDiskPath))
 	{
-		return Results;
+		TArray<FString> DiskFiles;
+		FString SearchPath = FPaths::Combine(FolderInfo.OutputsDiskPath, TEXT("*"));
+		IFileManager::Get().FindFiles(DiskFiles, *SearchPath, true, false);
+
+		for (const FString& FileName : DiskFiles)
+		{
+			UniquePaths.Add(FPaths::Combine(FolderInfo.OutputsDiskPath, FileName));
+		}
 	}
-	
-	if (!FPaths::DirectoryExists(FolderInfo.DiskPath))
-	{
-		return Results;
-	}
-	
-	// Find all files in the job folder
-	FString SearchPath = FPaths::Combine(FolderInfo.DiskPath, TEXT("*"));
-	IFileManager::Get().FindFiles(Results, *SearchPath, true, false);
-	
-	// Convert to full paths
-	for (FString& FileName : Results)
-	{
-		FileName = FPaths::Combine(FolderInfo.DiskPath, FileName);
-	}
+
+	Results = UniquePaths.Array();
 	
 	return Results;
 }
@@ -303,6 +371,11 @@ FString UAtlasOutputManager::GetMeshesFolder() const
 	return FPaths::Combine(GetOutputFolder(), TEXT("Meshes"));
 }
 
+FString UAtlasOutputManager::GetAudioFolder() const
+{
+	return FPaths::Combine(GetOutputFolder(), TEXT("Audio"));
+}
+
 bool UAtlasOutputManager::EnsureOutputFolderExists()
 {
 	bool bSuccess = true;
@@ -326,6 +399,13 @@ bool UAtlasOutputManager::EnsureOutputFolderExists()
 	if (!FPaths::DirectoryExists(MeshesPath))
 	{
 		bSuccess &= IFileManager::Get().MakeDirectory(*MeshesPath, true);
+	}
+
+	// Create Audio subfolder
+	FString AudioPath = GetAudioFolder();
+	if (!FPaths::DirectoryExists(AudioPath))
+	{
+		bSuccess &= IFileManager::Get().MakeDirectory(*AudioPath, true);
 	}
 
 	if (bSuccess)
@@ -365,6 +445,17 @@ bool UAtlasOutputManager::IsMeshFile(const FString& FileName)
 	return MeshExtensions.Contains(Extension);
 }
 
+bool UAtlasOutputManager::IsAudioFile(const FString& FileName)
+{
+	FString Extension = FPaths::GetExtension(FileName).ToLower();
+	
+	static const TArray<FString> AudioExtensions = {
+		TEXT("mp3"), TEXT("wav"), TEXT("ogg"), TEXT("flac")
+	};
+	
+	return AudioExtensions.Contains(Extension);
+}
+
 EAtlasFileCategory UAtlasOutputManager::GetFileCategory(const FString& FileName)
 {
 	if (IsImageFile(FileName))
@@ -374,6 +465,10 @@ EAtlasFileCategory UAtlasOutputManager::GetFileCategory(const FString& FileName)
 	if (IsMeshFile(FileName))
 	{
 		return EAtlasFileCategory::Mesh;
+	}
+	if (IsAudioFile(FileName))
+	{
+		return EAtlasFileCategory::Audio;
 	}
 	return EAtlasFileCategory::Other;
 }
@@ -556,6 +651,43 @@ FString UAtlasOutputManager::SanitizeWorkflowName(const FString& WorkflowName)
 	return Sanitized;
 }
 
+FString UAtlasOutputManager::SanitizeParameterName(const FString& ParameterName)
+{
+	if (ParameterName.IsEmpty())
+	{
+		return TEXT("Param");
+	}
+
+	FString Sanitized = ParameterName;
+
+	Sanitized.ReplaceInline(TEXT(" "), TEXT("_"));
+	Sanitized.ReplaceInline(TEXT("/"), TEXT("_"));
+	Sanitized.ReplaceInline(TEXT("\\"), TEXT("_"));
+	Sanitized.ReplaceInline(TEXT(":"), TEXT("_"));
+	Sanitized.ReplaceInline(TEXT("*"), TEXT("_"));
+	Sanitized.ReplaceInline(TEXT("?"), TEXT("_"));
+	Sanitized.ReplaceInline(TEXT("\""), TEXT("_"));
+	Sanitized.ReplaceInline(TEXT("<"), TEXT("_"));
+	Sanitized.ReplaceInline(TEXT(">"), TEXT("_"));
+	Sanitized.ReplaceInline(TEXT("|"), TEXT("_"));
+
+	while (Sanitized.StartsWith(TEXT("_")))
+	{
+		Sanitized.RightChopInline(1);
+	}
+	while (Sanitized.EndsWith(TEXT("_")))
+	{
+		Sanitized.LeftChopInline(1);
+	}
+
+	while (Sanitized.Contains(TEXT("__")))
+	{
+		Sanitized.ReplaceInline(TEXT("__"), TEXT("_"));
+	}
+
+	return Sanitized.IsEmpty() ? TEXT("Param") : Sanitized;
+}
+
 FAtlasJobFolderInfo UAtlasOutputManager::GetJobFolderInfo(UAtlasJob* Job) const
 {
 	FAtlasJobFolderInfo Info;
@@ -579,9 +711,12 @@ FAtlasJobFolderInfo UAtlasOutputManager::GetJobFolderInfo(UAtlasJob* Job) const
 	FString BasePath = Settings ? Settings->GetDefaultImportPathString() : TEXT("/Game/Atlas/Imported");
 	Info.ContentBrowserPath = FPaths::Combine(BasePath, Info.WorkflowName, Info.JobFolderName);
 	
-	// Build disk path for output files
+	// Build canonical disk paths for the per-run archive
 	FString OutputBase = GetOutputFolder();
 	Info.DiskPath = FPaths::Combine(OutputBase, Info.WorkflowName, Info.JobFolderName);
+	Info.InputsDiskPath = FPaths::Combine(Info.DiskPath, TEXT("inputs"));
+	Info.OutputsDiskPath = FPaths::Combine(Info.DiskPath, TEXT("outputs"));
+	Info.JobJsonPath = FPaths::Combine(Info.DiskPath, TEXT("job.json"));
 	
 	return Info;
 }
@@ -607,11 +742,95 @@ FAtlasJobFolderInfo UAtlasOutputManager::GetJobFolderInfoFromHistory(const FAtla
 	FString BasePath = Settings ? Settings->GetDefaultImportPathString() : TEXT("/Game/Atlas/Imported");
 	Info.ContentBrowserPath = FPaths::Combine(BasePath, Info.WorkflowName, Info.JobFolderName);
 	
-	// Build disk path for output files
+	// Build canonical disk paths for the per-run archive
 	FString OutputBase = GetOutputFolder();
 	Info.DiskPath = FPaths::Combine(OutputBase, Info.WorkflowName, Info.JobFolderName);
+	Info.InputsDiskPath = FPaths::Combine(Info.DiskPath, TEXT("inputs"));
+	Info.OutputsDiskPath = FPaths::Combine(Info.DiskPath, TEXT("outputs"));
+	Info.JobJsonPath = FPaths::Combine(Info.DiskPath, TEXT("job.json"));
+
+	if (!HistoryRecord.JobFolderPath.IsEmpty())
+	{
+		Info.DiskPath = HistoryRecord.JobFolderPath;
+		FPaths::NormalizeDirectoryName(Info.DiskPath);
+		Info.JobFolderName = FPaths::GetCleanFilename(Info.DiskPath);
+	}
+	if (!HistoryRecord.InputsFolderPath.IsEmpty())
+	{
+		Info.InputsDiskPath = HistoryRecord.InputsFolderPath;
+	}
+	else
+	{
+		Info.InputsDiskPath = FPaths::Combine(Info.DiskPath, TEXT("inputs"));
+	}
+	if (!HistoryRecord.OutputsFolderPath.IsEmpty())
+	{
+		Info.OutputsDiskPath = HistoryRecord.OutputsFolderPath;
+	}
+	else
+	{
+		Info.OutputsDiskPath = FPaths::Combine(Info.DiskPath, TEXT("outputs"));
+	}
+	if (!HistoryRecord.JobJsonPath.IsEmpty())
+	{
+		Info.JobJsonPath = HistoryRecord.JobJsonPath;
+	}
+	else
+	{
+		Info.JobJsonPath = FPaths::Combine(Info.DiskPath, TEXT("job.json"));
+	}
+
+	Info.ContentBrowserPath = FPaths::Combine(BasePath, Info.WorkflowName, Info.JobFolderName);
 	
 	return Info;
+}
+
+FString UAtlasOutputManager::GetJobRunFolder(UAtlasJob* Job) const
+{
+	FAtlasJobFolderInfo Info = GetJobFolderInfo(Job);
+	return Info.IsValid() ? Info.DiskPath : FString();
+}
+
+FString UAtlasOutputManager::GetJobInputsFolder(UAtlasJob* Job) const
+{
+	FAtlasJobFolderInfo Info = GetJobFolderInfo(Job);
+	return Info.IsValid() ? Info.InputsDiskPath : FString();
+}
+
+FString UAtlasOutputManager::GetJobOutputsFolder(UAtlasJob* Job) const
+{
+	FAtlasJobFolderInfo Info = GetJobFolderInfo(Job);
+	return Info.IsValid() ? Info.OutputsDiskPath : FString();
+}
+
+FString UAtlasOutputManager::GetJobJsonPath(UAtlasJob* Job) const
+{
+	FAtlasJobFolderInfo Info = GetJobFolderInfo(Job);
+	return Info.IsValid() ? Info.JobJsonPath : FString();
+}
+
+FString UAtlasOutputManager::GetJobRunFolderFromHistory(const FAtlasJobHistoryRecord& HistoryRecord) const
+{
+	FAtlasJobFolderInfo Info = GetJobFolderInfoFromHistory(HistoryRecord);
+	return Info.IsValid() ? Info.DiskPath : FString();
+}
+
+FString UAtlasOutputManager::GetJobInputsFolderFromHistory(const FAtlasJobHistoryRecord& HistoryRecord) const
+{
+	FAtlasJobFolderInfo Info = GetJobFolderInfoFromHistory(HistoryRecord);
+	return Info.IsValid() ? Info.InputsDiskPath : FString();
+}
+
+FString UAtlasOutputManager::GetJobOutputsFolderFromHistory(const FAtlasJobHistoryRecord& HistoryRecord) const
+{
+	FAtlasJobFolderInfo Info = GetJobFolderInfoFromHistory(HistoryRecord);
+	return Info.IsValid() ? Info.OutputsDiskPath : FString();
+}
+
+FString UAtlasOutputManager::GetJobJsonPathFromHistory(const FAtlasJobHistoryRecord& HistoryRecord) const
+{
+	FAtlasJobFolderInfo Info = GetJobFolderInfoFromHistory(HistoryRecord);
+	return Info.IsValid() ? Info.JobJsonPath : FString();
 }
 
 // ==================== Import Utilities (Editor Only) ====================
@@ -928,6 +1147,9 @@ FAtlasImportResult UAtlasOutputManager::ImportJobOutput(UAtlasJob* Job, const FS
 		case EAtlasValueType::Mesh:
 			Extension = TEXT("glb");
 			break;
+		case EAtlasValueType::Audio:
+			Extension = TEXT("mp3");
+			break;
 		default:
 			Extension = TEXT("bin");
 			break;
@@ -1071,6 +1293,9 @@ FAtlasImportResult UAtlasOutputManager::ImportJobOutputFromHistory(const FAtlasJ
 		case EAtlasValueType::Mesh:
 			Extension = TEXT("glb");
 			break;
+		case EAtlasValueType::Audio:
+			Extension = TEXT("mp3");
+			break;
 		default:
 			Extension = TEXT("bin");
 			break;
@@ -1107,26 +1332,19 @@ FAtlasImportResult UAtlasOutputManager::ImportJobOutputFromHistory(const FAtlasJ
 	
 	// Determine file path on disk
 	FString FilePath;
-	
-	// First, check if we have a saved path in OutputFilePaths
-	if (const FString* SavedPath = HistoryRecord.OutputFilePaths.Find(OutputName))
+
+	const FString SavedOutputPath = GetOutputFilePathForJobFromHistory(HistoryRecord, OutputName);
+	if (!SavedOutputPath.IsEmpty() && FPaths::FileExists(SavedOutputPath))
 	{
-		if (FPaths::FileExists(*SavedPath))
-		{
-			FilePath = *SavedPath;
-			UE_LOG(LogTemp, Log, TEXT("AtlasOutputManager::ImportJobOutputFromHistory - Using saved path from history: %s"), *FilePath);
-		}
+		FilePath = SavedOutputPath;
+		UE_LOG(LogTemp, Log, TEXT("AtlasOutputManager::ImportJobOutputFromHistory - Using history output path: %s"), *FilePath);
 	}
-	
-	// If no saved path, check the expected location
-	if (FilePath.IsEmpty())
+
+	const FString SavedFilePath = GetOutputFilePathForJobFromHistory(HistoryRecord, FileName);
+	if (FilePath.IsEmpty() && !SavedFilePath.IsEmpty() && FPaths::FileExists(SavedFilePath))
 	{
-		FString ExpectedPath = FPaths::Combine(FolderInfo.DiskPath, FileName);
-		if (FPaths::FileExists(ExpectedPath))
-		{
-			FilePath = ExpectedPath;
-			UE_LOG(LogTemp, Log, TEXT("AtlasOutputManager::ImportJobOutputFromHistory - Found file at expected location: %s"), *FilePath);
-		}
+		FilePath = SavedFilePath;
+		UE_LOG(LogTemp, Log, TEXT("AtlasOutputManager::ImportJobOutputFromHistory - Using history file path: %s"), *FilePath);
 	}
 	
 	// If still no file, try to save it from the output value's file data
@@ -1141,10 +1359,10 @@ FAtlasImportResult UAtlasOutputManager::ImportJobOutputFromHistory(const FAtlasJ
 		}
 		
 		// Ensure directory exists
-		IFileManager::Get().MakeDirectory(*FolderInfo.DiskPath, true);
+		IFileManager::Get().MakeDirectory(*FolderInfo.OutputsDiskPath, true);
 		
 		// Save the file
-		FilePath = FPaths::Combine(FolderInfo.DiskPath, FileName);
+		FilePath = FPaths::Combine(FolderInfo.OutputsDiskPath, FileName);
 		if (!FFileHelper::SaveArrayToFile(OutputValue.FileData, *FilePath))
 		{
 			Result.bSuccess = false;
@@ -1226,6 +1444,9 @@ FAtlasImportResult UAtlasOutputManager::FindImportedJobOutput(UAtlasJob* Job, co
 		case EAtlasValueType::Mesh:
 			Extension = TEXT("glb");
 			break;
+		case EAtlasValueType::Audio:
+			Extension = TEXT("mp3");
+			break;
 		default:
 			Extension = TEXT("bin");
 			break;
@@ -1297,6 +1518,9 @@ FAtlasImportResult UAtlasOutputManager::FindImportedJobOutputFromHistory(const F
 			break;
 		case EAtlasValueType::Mesh:
 			Extension = TEXT("glb");
+			break;
+		case EAtlasValueType::Audio:
+			Extension = TEXT("mp3");
 			break;
 		default:
 			Extension = TEXT("bin");

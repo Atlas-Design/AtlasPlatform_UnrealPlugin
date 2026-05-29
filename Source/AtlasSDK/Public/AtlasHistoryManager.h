@@ -53,6 +53,24 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Atlas|History")
 	bool SaveRecord(const FAtlasJobHistoryRecord& Record);
 
+	/**
+	 * Save a single per-run metadata file (`job.json`) for a history record.
+	 * This complements the legacy per-workflow history array.
+	 * @param Record The record to save
+	 * @return True if saved successfully
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Atlas|History")
+	bool SaveRecordToJobJson(const FAtlasJobHistoryRecord& Record);
+
+	/**
+	 * Load a single per-run metadata file (`job.json`).
+	 * @param JobJsonPath Full path to the metadata file
+	 * @param OutRecord Output: the loaded record
+	 * @return True if loaded successfully
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Atlas|History")
+	bool LoadRecordFromJobJson(const FString& JobJsonPath, FAtlasJobHistoryRecord& OutRecord);
+
 	// ==================== Query Operations ====================
 
 	/**
@@ -128,6 +146,43 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Atlas|History")
 	TArray<FAtlasWorkflowInfo> GetWorkflowInfoWithHistory();
 
+	// ==================== Batch History Queries ====================
+
+	/**
+	 * Get all distinct batch IDs from history.
+	 * @return Array of batch IDs that have at least one history record
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Atlas|History")
+	TArray<FString> GetBatchIds();
+
+	/**
+	 * Get all history records for a specific batch.
+	 * @param BatchId The batch ID to query
+	 * @return Array of records belonging to that batch, ordered by BatchIndex
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Atlas|History")
+	TArray<FAtlasJobHistoryRecord> GetHistoryForBatch(const FString& BatchId);
+
+	/**
+	 * Get summaries for all known batches.
+	 * Groups per-job history records by BatchId and returns aggregate counts.
+	 * @return Array of batch summaries, newest first
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Atlas|History")
+	TArray<FAtlasBatchSummary> QueryBatchSummaries();
+
+	// ==================== Reconciliation ====================
+
+	/**
+	 * Mark stale Running history records as Failed.
+	 * Should be called once on editor startup to handle jobs that were
+	 * interrupted by a crash or unexpected shutdown.
+	 * @param ThresholdHours Records older than this are considered stale (default: from settings)
+	 * @return Number of records reconciled
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Atlas|History")
+	int32 ReconcileStaleJobs(int32 ThresholdHours = 0);
+
 	// ==================== Utility ====================
 
 	/**
@@ -156,11 +211,17 @@ protected:
 	/** Load history records from a file */
 	TArray<FAtlasJobHistoryRecord> LoadHistoryFile(const FString& FilePath);
 
+	/** Load per-run job.json records from the configured output folder */
+	TArray<FAtlasJobHistoryRecord> LoadJobJsonRecords(const FString& ApiIdFilter = TEXT(""));
+
 	/** Save history records to a file */
 	bool SaveHistoryFile(const FString& FilePath, const TArray<FAtlasJobHistoryRecord>& Records);
 
 	/** Convert a job to a history record */
 	FAtlasJobHistoryRecord JobToRecord(UAtlasJob* Job);
+
+	/** Populate per-run archive folder paths on a record if missing */
+	void PopulateRunArchivePaths(FAtlasJobHistoryRecord& Record) const;
 
 	/** Convert a record to JSON */
 	TSharedPtr<FJsonObject> RecordToJson(const FAtlasJobHistoryRecord& Record);

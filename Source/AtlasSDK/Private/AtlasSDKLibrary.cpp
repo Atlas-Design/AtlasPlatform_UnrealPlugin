@@ -44,6 +44,11 @@ FAtlasValue UAtlasSDKLibrary::MakeMeshValue(const FString& FilePath)
 	return FAtlasValue::MakeMesh(FilePath);
 }
 
+FAtlasValue UAtlasSDKLibrary::MakeAudioValue(const FString& FilePath)
+{
+	return FAtlasValue::MakeAudio(FilePath);
+}
+
 FAtlasValue UAtlasSDKLibrary::MakeJsonValue(const FString& JsonString)
 {
 	return FAtlasValue::MakeJson(JsonString);
@@ -151,6 +156,11 @@ void UAtlasSDKLibrary::SetImageInput(FAtlasWorkflowInputs& Inputs, const FString
 void UAtlasSDKLibrary::SetMeshInput(FAtlasWorkflowInputs& Inputs, const FString& Name, const FString& FilePath)
 {
 	Inputs.SetMesh(Name, FilePath);
+}
+
+void UAtlasSDKLibrary::SetAudioInput(FAtlasWorkflowInputs& Inputs, const FString& Name, const FString& FilePath)
+{
+	Inputs.SetAudio(Name, FilePath);
 }
 
 void UAtlasSDKLibrary::SetJsonInput(FAtlasWorkflowInputs& Inputs, const FString& Name, const FString& JsonString)
@@ -461,4 +471,108 @@ void UAtlasSDKLibrary::SetQueryDateFilter(FAtlasHistoryQuery& Query, bool bFilte
 void UAtlasSDKLibrary::ClearQueryFilters(FAtlasHistoryQuery& Query)
 {
 	Query = FAtlasHistoryQuery();
+}
+
+// ==================== Batch Helpers ====================
+
+float UAtlasSDKLibrary::GetBatchProgressFraction(const FAtlasBatchProgress& Progress)
+{
+	return Progress.GetProgress();
+}
+
+bool UAtlasSDKLibrary::IsBatchComplete(const FAtlasBatchProgress& Progress)
+{
+	return Progress.IsComplete();
+}
+
+FString UAtlasSDKLibrary::FormatBatchStatus(const FAtlasBatchProgress& Progress)
+{
+	TArray<FString> Parts;
+
+	if (Progress.SucceededCount > 0)
+	{
+		Parts.Add(FString::Printf(TEXT("%d/%d Succeeded"), Progress.SucceededCount, Progress.TotalRows));
+	}
+	if (Progress.FailedCount > 0)
+	{
+		Parts.Add(FString::Printf(TEXT("%d Failed"), Progress.FailedCount));
+	}
+	if (Progress.CancelledCount > 0)
+	{
+		Parts.Add(FString::Printf(TEXT("%d Cancelled"), Progress.CancelledCount));
+	}
+	if (Progress.RunningCount > 0)
+	{
+		Parts.Add(FString::Printf(TEXT("%d Running"), Progress.RunningCount));
+	}
+	if (Progress.PendingCount > 0)
+	{
+		Parts.Add(FString::Printf(TEXT("%d Pending"), Progress.PendingCount));
+	}
+
+	if (Parts.Num() == 0)
+	{
+		return TEXT("Empty batch");
+	}
+
+	return FString::Join(Parts, TEXT(" \u2022 "));
+}
+
+EAtlasBatchRowStatus UAtlasSDKLibrary::GetBatchRowStatus(const FAtlasBatchDefinition& Batch, int32 RowIndex)
+{
+	if (Batch.Rows.IsValidIndex(RowIndex))
+	{
+		return Batch.Rows[RowIndex].Status;
+	}
+	return EAtlasBatchRowStatus::Pending;
+}
+
+FString UAtlasSDKLibrary::BatchRowStatusToString(EAtlasBatchRowStatus Status)
+{
+	switch (Status)
+	{
+	case EAtlasBatchRowStatus::Pending:   return TEXT("Pending");
+	case EAtlasBatchRowStatus::Running:   return TEXT("Running");
+	case EAtlasBatchRowStatus::Succeeded: return TEXT("Succeeded");
+	case EAtlasBatchRowStatus::Failed:    return TEXT("Failed");
+	case EAtlasBatchRowStatus::Cancelled: return TEXT("Cancelled");
+	default:                              return TEXT("Unknown");
+	}
+}
+
+bool UAtlasSDKLibrary::IsBatchRowTerminal(EAtlasBatchRowStatus Status)
+{
+	return Status == EAtlasBatchRowStatus::Succeeded
+		|| Status == EAtlasBatchRowStatus::Failed
+		|| Status == EAtlasBatchRowStatus::Cancelled;
+}
+
+int32 UAtlasSDKLibrary::GetBatchRowCount(const FAtlasBatchDefinition& Batch)
+{
+	return Batch.Rows.Num();
+}
+
+bool UAtlasSDKLibrary::GetBatchRow(const FAtlasBatchDefinition& Batch, int32 RowIndex, FAtlasBatchRow& OutRow)
+{
+	if (Batch.Rows.IsValidIndex(RowIndex))
+	{
+		OutRow = Batch.Rows[RowIndex];
+		return true;
+	}
+	return false;
+}
+
+bool UAtlasSDKLibrary::IsBatchSummaryComplete(const FAtlasBatchSummary& Summary)
+{
+	return Summary.IsComplete();
+}
+
+bool UAtlasSDKLibrary::IsHistoryRecordRetry(const FAtlasJobHistoryRecord& Record)
+{
+	return Record.IsRetry();
+}
+
+bool UAtlasSDKLibrary::IsHistoryRecordBatchJob(const FAtlasJobHistoryRecord& Record)
+{
+	return Record.IsBatchJob();
 }

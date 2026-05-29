@@ -11,17 +11,18 @@ class IAssetTypeActions;
 class FAtlasWorkflowEditorModule : public IModuleInterface
 {
 public:
-    /** IModuleInterface implementation */
     virtual void StartupModule() override;
     virtual void ShutdownModule() override;
 
 private:
-    /** Register menu extensions */
     void RegisterMenus();
-    
-    /** Open the Atlas Workflow editor window */
-    void OpenAtlasWorkflowWindow();
 
-    /** Registered asset type actions */
+    void OpenEditorUtilityWidget(const FString& WidgetAssetPath);
+    void OpenWorkflowEditor();
+    void OpenBatchEditor();
+    void OpenJobHistory();
+
+    static void BuildAtlasToolbarMenu(UToolMenu* Menu);
+
     TArray<TSharedPtr<IAssetTypeActions>> RegisteredAssetTypeActions;
 };

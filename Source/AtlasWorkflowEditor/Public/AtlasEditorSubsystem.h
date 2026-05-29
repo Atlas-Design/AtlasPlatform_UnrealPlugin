@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "EditorSubsystem.h"
+#include "Types/AtlasHistoryTypes.h"
 #include "AtlasEditorSubsystem.generated.h"
 
 class UAtlasJobManager;
@@ -92,6 +93,9 @@ public:
 	TArray<UAtlasWorkflowAsset*> GetAllWorkflowAssets();
 
 private:
+	UFUNCTION()
+	void OnJobSavedToHistory(const FAtlasJobHistoryRecord& Record);
+
 	/** Job Manager instance - created lazily */
 	UPROPERTY()
 	TObjectPtr<UAtlasJobManager> JobManager;
