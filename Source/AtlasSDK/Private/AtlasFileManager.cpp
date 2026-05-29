@@ -3,6 +3,7 @@
 #include "AtlasFileManager.h"
 #include "AtlasHttpRequest.h"
 #include "AtlasJsonObject.h"
+#include "AtlasPlatformAuth.h"
 #include "AtlasWorkflowAsset.h"
 #include "Misc/FileHelper.h"
 #include "Misc/SecureHash.h"
@@ -172,6 +173,8 @@ void UAtlasFileManager::ExecuteUpload(const FGuid& OperationId, const FString& U
 	Request->SetHeader(TEXT("X-Filename"), FileName);
 	Request->SetHeader(TEXT("X-Content-Hash"), ContentHash);
 
+	FAtlasPlatformAuth::ApplyPlatformAuthHeaders(Request);
+
 	// Bind callbacks
 	Request->OnRequestComplete.AddDynamic(this, &UAtlasFileManager::OnUploadRequestComplete);
 	Request->OnRequestFailed.AddDynamic(this, &UAtlasFileManager::OnUploadRequestFailed);
@@ -197,6 +200,21 @@ void UAtlasFileManager::OnUploadRequestComplete(UAtlasHttpRequest* Request, UAtl
 	FGuid OperationId = PendingUpload->OperationId;
 	FString ContentHash = PendingUpload->ContentHash;
 	FString FileName = PendingUpload->FileName;
+
+	if (StatusCode < 200 || StatusCode >= 300)
+	{
+		const FString FailureMessage = FAtlasPlatformAuth::GetHttpFailureMessage(
+			StatusCode,
+			FString::Printf(TEXT("Upload failed with HTTP %d"), StatusCode));
+
+		UE_LOG(LogTemp, Error, TEXT("AtlasFileManager: Upload %s failed: %s"),
+			*OperationId.ToString(EGuidFormats::DigitsWithHyphens), *FailureMessage);
+
+		OnUploadFailed.Broadcast(OperationId, FailureMessage, StatusCode);
+		RemovePendingUpload(OperationId);
+		Request->RemoveFromRoot();
+		return;
+	}
 
 	// Parse response to get FileId
 	FString FileId;
@@ -249,10 +267,14 @@ void UAtlasFileManager::OnUploadRequestFailed(UAtlasHttpRequest* Request, const 
 
 	FGuid OperationId = PendingUpload->OperationId;
 
-	UE_LOG(LogTemp, Error, TEXT("AtlasFileManager: Upload %s failed: %s (HTTP %d)"),
-		*OperationId.ToString(EGuidFormats::DigitsWithHyphens), *ErrorMessage, StatusCode);
+	const FString FailureMessage = FAtlasPlatformAuth::GetHttpFailureMessage(
+		StatusCode,
+		ErrorMessage.IsEmpty() ? FString::Printf(TEXT("Upload failed with HTTP %d"), StatusCode) : ErrorMessage);
 
-	OnUploadFailed.Broadcast(OperationId, ErrorMessage, StatusCode);
+	UE_LOG(LogTemp, Error, TEXT("AtlasFileManager: Upload %s failed: %s (HTTP %d)"),
+		*OperationId.ToString(EGuidFormats::DigitsWithHyphens), *FailureMessage, StatusCode);
+
+	OnUploadFailed.Broadcast(OperationId, FailureMessage, StatusCode);
 
 	// Cleanup
 	RemovePendingUpload(OperationId);
@@ -394,6 +416,8 @@ void UAtlasFileManager::ExecuteDownload(const FGuid& OperationId, const FString&
 	Request->SetURL(DownloadUrl);
 	Request->SetVerb(EAtlasHttpVerb::GET);
 
+	FAtlasPlatformAuth::ApplyPlatformAuthHeaders(Request);
+
 	// Bind callbacks
 	Request->OnRequestComplete.AddDynamic(this, &UAtlasFileManager::OnDownloadRequestComplete);
 	Request->OnRequestFailed.AddDynamic(this, &UAtlasFileManager::OnDownloadRequestFailed);
@@ -418,6 +442,21 @@ void UAtlasFileManager::OnDownloadRequestComplete(UAtlasHttpRequest* Request, UA
 
 	FGuid OperationId = PendingDownload->OperationId;
 	FString FileId = PendingDownload->FileId;
+
+	if (StatusCode < 200 || StatusCode >= 300)
+	{
+		const FString FailureMessage = FAtlasPlatformAuth::GetHttpFailureMessage(
+			StatusCode,
+			FString::Printf(TEXT("Download failed with HTTP %d"), StatusCode));
+
+		UE_LOG(LogTemp, Error, TEXT("AtlasFileManager: Download %s failed: %s"),
+			*OperationId.ToString(EGuidFormats::DigitsWithHyphens), *FailureMessage);
+
+		OnDownloadFailed.Broadcast(OperationId, FailureMessage, StatusCode);
+		RemovePendingDownload(OperationId);
+		Request->RemoveFromRoot();
+		return;
+	}
 
 	// Get the response content as binary data
 	const TArray<uint8>& ResponseData = Request->GetResponseContentBinary();
@@ -457,10 +496,14 @@ void UAtlasFileManager::OnDownloadRequestFailed(UAtlasHttpRequest* Request, cons
 
 	FGuid OperationId = PendingDownload->OperationId;
 
-	UE_LOG(LogTemp, Error, TEXT("AtlasFileManager: Download %s failed: %s (HTTP %d)"),
-		*OperationId.ToString(EGuidFormats::DigitsWithHyphens), *ErrorMessage, StatusCode);
+	const FString FailureMessage = FAtlasPlatformAuth::GetHttpFailureMessage(
+		StatusCode,
+		ErrorMessage.IsEmpty() ? FString::Printf(TEXT("Download failed with HTTP %d"), StatusCode) : ErrorMessage);
 
-	OnDownloadFailed.Broadcast(OperationId, ErrorMessage, StatusCode);
+	UE_LOG(LogTemp, Error, TEXT("AtlasFileManager: Download %s failed: %s (HTTP %d)"),
+		*OperationId.ToString(EGuidFormats::DigitsWithHyphens), *FailureMessage, StatusCode);
+
+	OnDownloadFailed.Broadcast(OperationId, FailureMessage, StatusCode);
 
 	// Cleanup
 	RemovePendingDownload(OperationId);

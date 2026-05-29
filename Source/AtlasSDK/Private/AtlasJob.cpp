@@ -6,7 +6,9 @@
 #include "AtlasHttpRequest.h"
 #include "AtlasJsonObject.h"
 #include "AtlasOutputManager.h"
+#include "AtlasPlatformAuth.h"
 #include "AtlasSDKSettings.h"
+#include "Types/AtlasErrorTypes.h"
 #include "Async/Async.h"
 #include "HAL/PlatformFileManager.h"
 #include "Misc/FileHelper.h"
@@ -87,6 +89,16 @@ bool UAtlasJob::Execute()
 		NoManagerError.Message = TEXT("Cannot execute job without a FileManager");
 		NoManagerError.Timestamp = FDateTime::UtcNow();
 		FailWithError(NoManagerError);
+		return false;
+	}
+
+	if (WorkflowAsset->UsesWorkspaceScopedFileApi() && !FAtlasPlatformAuth::HasConfiguredApiKey())
+	{
+		FAtlasError AuthError;
+		AuthError.Code = EAtlasErrorCode::Unauthorized;
+		AuthError.Message = FAtlasPlatformAuth::GetConfigureApiKeyMessage();
+		AuthError.Timestamp = FDateTime::UtcNow();
+		FailWithError(AuthError);
 		return false;
 	}
 
@@ -407,8 +419,22 @@ void UAtlasJob::OnFileUploadFailed(const FGuid& OperationId, const FString& Erro
 
 	// Fail immediately on first upload error
 	FAtlasError UploadError;
-	UploadError.Code = EAtlasErrorCode::UploadFailed;
-	UploadError.Message = FString::Printf(TEXT("Failed to upload '%s': %s"), *InputName, *ErrorMessage);
+	if (StatusCode == 401)
+	{
+		UploadError.Code = EAtlasErrorCode::Unauthorized;
+		UploadError.Message = FString::Printf(
+			TEXT("Failed to upload '%s': %s"),
+			*InputName,
+			*FAtlasPlatformAuth::GetConfigureApiKeyMessage());
+	}
+	else
+	{
+		UploadError.Code = EAtlasErrorCode::UploadFailed;
+		UploadError.Message = FString::Printf(
+			TEXT("Failed to upload '%s': %s"),
+			*InputName,
+			*FAtlasPlatformAuth::GetHttpFailureMessage(StatusCode, ErrorMessage));
+	}
 	UploadError.HttpStatusCode = StatusCode;
 	UploadError.Timestamp = FDateTime::UtcNow();
 	FailWithError(UploadError);
@@ -480,6 +506,8 @@ void UAtlasJob::StartExecutePhase()
 	ExecuteRequest->SetVerb(EAtlasHttpVerb::POST);
 	ExecuteRequest->SetContentType(EAtlasHttpContentType::JSON);
 	ExecuteRequest->SetRequestBodyJson(Payload);
+
+	FAtlasPlatformAuth::ApplyPlatformAuthHeaders(ExecuteRequest);
 
 	// Bind callbacks
 	ExecuteRequest->OnRequestComplete.AddDynamic(this, &UAtlasJob::OnExecuteRequestComplete);
@@ -607,11 +635,16 @@ void UAtlasJob::OnExecuteRequestComplete(UAtlasHttpRequest* Request, UAtlasJsonO
 	}
 	else
 	{
-		FAtlasError ExecError;
-		ExecError.Code = EAtlasErrorCode::ExecutionFailed;
+		const FString ResponseBody = Request->GetResponseContent();
+		FAtlasError ExecError = FAtlasError::FromHttpStatus(StatusCode, ResponseBody);
 		ExecError.HttpStatusCode = StatusCode;
-		
-		if (ResponseJson)
+		ExecError.Timestamp = FDateTime::UtcNow();
+
+		if (StatusCode == 401 || StatusCode == 403)
+		{
+			ExecError.Message = FAtlasPlatformAuth::GetHttpFailureMessage(StatusCode, ExecError.Message);
+		}
+		else if (ResponseJson)
 		{
 			ExecError.Message = ResponseJson->GetStringField(TEXT("error"));
 			if (ExecError.Message.IsEmpty())
@@ -619,11 +652,16 @@ void UAtlasJob::OnExecuteRequestComplete(UAtlasHttpRequest* Request, UAtlasJsonO
 				ExecError.Message = ResponseJson->GetStringField(TEXT("message"));
 			}
 		}
+
 		if (ExecError.Message.IsEmpty())
 		{
 			ExecError.Message = FString::Printf(TEXT("Execute request failed with status %d"), StatusCode);
 		}
-		ExecError.Timestamp = FDateTime::UtcNow();
+
+		if (ExecError.Code == EAtlasErrorCode::None || ExecError.Code == EAtlasErrorCode::Unknown)
+		{
+			ExecError.Code = EAtlasErrorCode::ExecutionFailed;
+		}
 
 		CleanupExecuteRequest();
 		FailWithError(ExecError);
@@ -641,11 +679,19 @@ void UAtlasJob::OnExecuteRequestFailed(UAtlasHttpRequest* Request, const FString
 	UE_LOG(LogTemp, Error, TEXT("AtlasJob[%s] execute request failed: %s (status %d)"),
 		*JobId.ToString(EGuidFormats::DigitsWithHyphens), *ErrorMessage, StatusCode);
 
-	FAtlasError ExecError;
-	ExecError.Code = EAtlasErrorCode::NetworkError;
-	ExecError.Message = ErrorMessage;
+	FAtlasError ExecError = FAtlasError::FromHttpStatus(StatusCode, FString());
 	ExecError.HttpStatusCode = StatusCode;
 	ExecError.Timestamp = FDateTime::UtcNow();
+
+	if (StatusCode == 401 || StatusCode == 403)
+	{
+		ExecError.Message = FAtlasPlatformAuth::GetHttpFailureMessage(StatusCode, ErrorMessage);
+	}
+	else
+	{
+		ExecError.Code = EAtlasErrorCode::NetworkError;
+		ExecError.Message = ErrorMessage;
+	}
 
 	CleanupExecuteRequest();
 	FailWithError(ExecError);
@@ -718,6 +764,8 @@ void UAtlasJob::PollStatus()
 	StatusRequest->SetURL(StatusUrl);
 	StatusRequest->SetVerb(EAtlasHttpVerb::GET);
 
+	FAtlasPlatformAuth::ApplyPlatformAuthHeaders(StatusRequest);
+
 	// Bind callbacks
 	StatusRequest->OnRequestComplete.AddDynamic(this, &UAtlasJob::OnStatusPollComplete);
 	StatusRequest->OnRequestFailed.AddDynamic(this, &UAtlasJob::OnStatusPollFailed);
@@ -737,11 +785,25 @@ void UAtlasJob::OnStatusPollComplete(UAtlasHttpRequest* Request, UAtlasJsonObjec
 
 	if (StatusCode < 200 || StatusCode >= 300)
 	{
-		FAtlasError ExecError;
-		ExecError.Code = EAtlasErrorCode::ExecutionFailed;
+		const FString ResponseBody = Request->GetResponseContent();
+		FAtlasError ExecError = FAtlasError::FromHttpStatus(StatusCode, ResponseBody);
 		ExecError.HttpStatusCode = StatusCode;
-		ExecError.Message = FString::Printf(TEXT("Status poll failed with status %d"), StatusCode);
 		ExecError.Timestamp = FDateTime::UtcNow();
+
+		if (StatusCode == 401 || StatusCode == 403)
+		{
+			ExecError.Message = FAtlasPlatformAuth::GetHttpFailureMessage(StatusCode, ExecError.Message);
+		}
+		else if (ExecError.Message.IsEmpty())
+		{
+			ExecError.Message = FString::Printf(TEXT("Status poll failed with status %d"), StatusCode);
+		}
+
+		if (ExecError.Code == EAtlasErrorCode::None || ExecError.Code == EAtlasErrorCode::Unknown)
+		{
+			ExecError.Code = EAtlasErrorCode::ExecutionFailed;
+		}
+
 		FailWithError(ExecError);
 		return;
 	}
@@ -856,11 +918,20 @@ void UAtlasJob::OnStatusPollFailed(UAtlasHttpRequest* Request, const FString& Er
 
 	CleanupStatusRequest();
 
-	FAtlasError ExecError;
-	ExecError.Code = EAtlasErrorCode::NetworkError;
-	ExecError.Message = ErrorMessage;
+	FAtlasError ExecError = FAtlasError::FromHttpStatus(StatusCode, FString());
 	ExecError.HttpStatusCode = StatusCode;
 	ExecError.Timestamp = FDateTime::UtcNow();
+
+	if (StatusCode == 401 || StatusCode == 403)
+	{
+		ExecError.Message = FAtlasPlatformAuth::GetHttpFailureMessage(StatusCode, ErrorMessage);
+	}
+	else
+	{
+		ExecError.Code = EAtlasErrorCode::NetworkError;
+		ExecError.Message = ErrorMessage;
+	}
+
 	FailWithError(ExecError);
 }
 

@@ -33,3 +33,23 @@ void FAtlasPlatformAuth::ApplyPlatformAuthHeaders(UAtlasHttpRequest* Request)
 
 	Request->SetHeader(TEXT("Authorization"), FString::Printf(TEXT("Bearer %s"), *ApiKey));
 }
+
+FString FAtlasPlatformAuth::GetConfigureApiKeyMessage()
+{
+	return TEXT(
+		"Atlas workspace API key is required. Set it in Project Settings → Plugins → Atlas SDK → "
+		"Authentication, or set the ATLAS_API_KEY environment variable.");
+}
+
+FString FAtlasPlatformAuth::GetHttpFailureMessage(int32 StatusCode, const FString& FallbackMessage)
+{
+	switch (StatusCode)
+	{
+	case 401:
+		return FString::Printf(TEXT("Authentication failed (401). %s"), *GetConfigureApiKeyMessage());
+	case 403:
+		return TEXT("Access denied (403). Verify your API key has access to this workspace.");
+	default:
+		return FallbackMessage;
+	}
+}
