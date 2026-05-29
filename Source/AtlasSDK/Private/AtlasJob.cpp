@@ -92,7 +92,7 @@ bool UAtlasJob::Execute()
 		return false;
 	}
 
-	if (WorkflowAsset->UsesWorkspaceScopedFileApi() && !FAtlasPlatformAuth::HasConfiguredApiKey())
+	if (!FAtlasPlatformAuth::HasConfiguredApiKey())
 	{
 		FAtlasError AuthError;
 		AuthError.Code = EAtlasErrorCode::Unauthorized;

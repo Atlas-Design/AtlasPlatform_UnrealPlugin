@@ -3,6 +3,7 @@
 #include "AtlasFileManager.h"
 #include "AtlasHttpRequest.h"
 #include "AtlasJsonObject.h"
+#include "AtlasMultipartForm.h"
 #include "AtlasPlatformAuth.h"
 #include "AtlasWorkflowAsset.h"
 #include "Misc/FileHelper.h"
@@ -165,13 +166,34 @@ void UAtlasFileManager::ExecuteUpload(const FGuid& OperationId, const FString& U
 	Request->SetURL(UploadUrl);
 	Request->SetVerb(EAtlasHttpVerb::POST);
 
-	// Set binary content
-	Request->SetBinaryContentType(TEXT("application/octet-stream"));
-	Request->SetBinaryRequestContent(FileData);
+	FString TrimmedUploadUrl = UploadUrl;
+	TrimmedUploadUrl.TrimEndInline();
+	const bool bUseMultipartUpload = TrimmedUploadUrl.EndsWith(TEXT("/upload"), ESearchCase::IgnoreCase);
 
-	// Add filename header (server uses this for content type detection)
-	Request->SetHeader(TEXT("X-Filename"), FileName);
-	Request->SetHeader(TEXT("X-Content-Hash"), ContentHash);
+	if (bUseMultipartUpload)
+	{
+		// API v0.2+: multipart form field "file" (matches platform Python export)
+		FAtlasMultipartForm::FMultipartBody MultipartBody;
+		if (!FAtlasMultipartForm::BuildSingleFileField(TEXT("file"), FileName, FileData, MultipartBody))
+		{
+			UE_LOG(LogTemp, Error, TEXT("AtlasFileManager: Failed to build multipart body for '%s'"), *FileName);
+			OnUploadFailed.Broadcast(OperationId, TEXT("Failed to build multipart upload body"), 0);
+			RemovePendingUpload(OperationId);
+			Request->RemoveFromRoot();
+			return;
+		}
+
+		Request->SetBinaryContentType(MultipartBody.ContentType);
+		Request->SetBinaryRequestContent(MultipartBody.Content);
+	}
+	else
+	{
+		// Legacy v0.1: raw binary body with custom headers
+		Request->SetBinaryContentType(TEXT("application/octet-stream"));
+		Request->SetBinaryRequestContent(FileData);
+		Request->SetHeader(TEXT("X-Filename"), FileName);
+		Request->SetHeader(TEXT("X-Content-Hash"), ContentHash);
+	}
 
 	FAtlasPlatformAuth::ApplyPlatformAuthHeaders(Request);
 
@@ -179,8 +201,9 @@ void UAtlasFileManager::ExecuteUpload(const FGuid& OperationId, const FString& U
 	Request->OnRequestComplete.AddDynamic(this, &UAtlasFileManager::OnUploadRequestComplete);
 	Request->OnRequestFailed.AddDynamic(this, &UAtlasFileManager::OnUploadRequestFailed);
 
-	UE_LOG(LogTemp, Log, TEXT("AtlasFileManager: Starting upload %s to %s (%s, %d bytes, hash: %s)"),
-		*OperationId.ToString(EGuidFormats::DigitsWithHyphens), *UploadUrl, *FileName, FileData.Num(), *ContentHash);
+	UE_LOG(LogTemp, Log, TEXT("AtlasFileManager: Starting upload %s to %s (%s, %d bytes, hash: %s, multipart=%s)"),
+		*OperationId.ToString(EGuidFormats::DigitsWithHyphens), *UploadUrl, *FileName, FileData.Num(), *ContentHash,
+		bUseMultipartUpload ? TEXT("true") : TEXT("false"));
 
 	// Execute request
 	Request->ProcessRequest();

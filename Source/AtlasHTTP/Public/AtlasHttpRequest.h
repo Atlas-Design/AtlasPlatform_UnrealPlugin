@@ -75,6 +75,13 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "AtlasHTTP|Request")
 	void SetBinaryRequestContent(const TArray<uint8>& Content);
 
+	/**
+	 * Set request body as multipart/form-data with a single file field (API v0.2 upload).
+	 * @param FieldName Form field name (platform export uses "file")
+	 */
+	UFUNCTION(BlueprintCallable, Category = "AtlasHTTP|Request")
+	void SetMultipartFileBody(const FString& FieldName, const FString& FileName, const TArray<uint8>& FileContent);
+
 	/** Set the request timeout in seconds (0 = no timeout) */
 	UFUNCTION(BlueprintCallable, Category = "AtlasHTTP|Request")
 	void SetTimeout(float TimeoutSeconds);

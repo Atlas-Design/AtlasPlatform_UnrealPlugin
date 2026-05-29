@@ -2,6 +2,7 @@
 
 #include "AtlasHttpRequest.h"
 #include "AtlasJsonObject.h"
+#include "AtlasMultipartForm.h"
 #include "AtlasHTTP.h"
 #include "HttpModule.h"
 
@@ -89,6 +90,20 @@ void UAtlasHttpRequest::SetBinaryContentType(const FString& ContentType)
 void UAtlasHttpRequest::SetBinaryRequestContent(const TArray<uint8>& Content)
 {
 	RequestBytes = Content;
+}
+
+void UAtlasHttpRequest::SetMultipartFileBody(const FString& FieldName, const FString& FileName, const TArray<uint8>& FileContent)
+{
+	FAtlasMultipartForm::FMultipartBody MultipartBody;
+	if (!FAtlasMultipartForm::BuildSingleFileField(FieldName, FileName, FileContent, MultipartBody))
+	{
+		UE_LOG(LogAtlasHTTP, Error, TEXT("Failed to build multipart body for field '%s'"), *FieldName);
+		RequestBytes.Reset();
+		return;
+	}
+
+	BinaryContentType = MultipartBody.ContentType;
+	RequestBytes = MoveTemp(MultipartBody.Content);
 }
 
 void UAtlasHttpRequest::SetTimeout(float InTimeoutSeconds)
