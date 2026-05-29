@@ -23,6 +23,9 @@ namespace FAtlasPlatformAuth
 	/** Sets Authorization: Bearer on the request when a key is configured. */
 	ATLASSDK_API void ApplyPlatformAuthHeaders(UAtlasHttpRequest* Request);
 
+	/** Auth headers + HTTP timeout from project settings (upload, execute, status, download). */
+	ATLASSDK_API void ApplyPlatformRequestSettings(UAtlasHttpRequest* Request);
+
 	/** User-facing message when v0.2+ requires a key that is not configured. */
 	ATLASSDK_API FString GetConfigureApiKeyMessage();
 

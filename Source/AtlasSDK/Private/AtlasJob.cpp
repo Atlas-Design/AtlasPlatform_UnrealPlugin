@@ -507,7 +507,7 @@ void UAtlasJob::StartExecutePhase()
 	ExecuteRequest->SetContentType(EAtlasHttpContentType::JSON);
 	ExecuteRequest->SetRequestBodyJson(Payload);
 
-	FAtlasPlatformAuth::ApplyPlatformAuthHeaders(ExecuteRequest);
+	FAtlasPlatformAuth::ApplyPlatformRequestSettings(ExecuteRequest);
 
 	// Bind callbacks
 	ExecuteRequest->OnRequestComplete.AddDynamic(this, &UAtlasJob::OnExecuteRequestComplete);
@@ -764,7 +764,7 @@ void UAtlasJob::PollStatus()
 	StatusRequest->SetURL(StatusUrl);
 	StatusRequest->SetVerb(EAtlasHttpVerb::GET);
 
-	FAtlasPlatformAuth::ApplyPlatformAuthHeaders(StatusRequest);
+	FAtlasPlatformAuth::ApplyPlatformRequestSettings(StatusRequest);
 
 	// Bind callbacks
 	StatusRequest->OnRequestComplete.AddDynamic(this, &UAtlasJob::OnStatusPollComplete);

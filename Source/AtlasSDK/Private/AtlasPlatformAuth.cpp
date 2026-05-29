@@ -5,6 +5,23 @@
 #include "AtlasHttpRequest.h"
 #include "GenericPlatform/GenericPlatformMisc.h"
 
+namespace
+{
+	void ApplyRequestTimeout(UAtlasHttpRequest* Request)
+	{
+		if (!Request)
+		{
+			return;
+		}
+
+		const UAtlasSDKSettings* Settings = UAtlasSDKSettings::Get();
+		if (Settings && Settings->RequestTimeoutSeconds > 0.0f)
+		{
+			Request->SetTimeout(Settings->RequestTimeoutSeconds);
+		}
+	}
+}
+
 const FString FAtlasPlatformAuth::ApiKeyEnvironmentVariableName(TEXT("ATLAS_API_KEY"));
 
 bool FAtlasPlatformAuth::HasConfiguredApiKey()
@@ -32,6 +49,12 @@ void FAtlasPlatformAuth::ApplyPlatformAuthHeaders(UAtlasHttpRequest* Request)
 	}
 
 	Request->SetHeader(TEXT("Authorization"), FString::Printf(TEXT("Bearer %s"), *ApiKey));
+}
+
+void FAtlasPlatformAuth::ApplyPlatformRequestSettings(UAtlasHttpRequest* Request)
+{
+	ApplyPlatformAuthHeaders(Request);
+	ApplyRequestTimeout(Request);
 }
 
 FString FAtlasPlatformAuth::GetConfigureApiKeyMessage()

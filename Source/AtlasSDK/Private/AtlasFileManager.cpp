@@ -195,7 +195,7 @@ void UAtlasFileManager::ExecuteUpload(const FGuid& OperationId, const FString& U
 		Request->SetHeader(TEXT("X-Content-Hash"), ContentHash);
 	}
 
-	FAtlasPlatformAuth::ApplyPlatformAuthHeaders(Request);
+	FAtlasPlatformAuth::ApplyPlatformRequestSettings(Request);
 
 	// Bind callbacks
 	Request->OnRequestComplete.AddDynamic(this, &UAtlasFileManager::OnUploadRequestComplete);
@@ -439,7 +439,7 @@ void UAtlasFileManager::ExecuteDownload(const FGuid& OperationId, const FString&
 	Request->SetURL(DownloadUrl);
 	Request->SetVerb(EAtlasHttpVerb::GET);
 
-	FAtlasPlatformAuth::ApplyPlatformAuthHeaders(Request);
+	FAtlasPlatformAuth::ApplyPlatformRequestSettings(Request);
 
 	// Bind callbacks
 	Request->OnRequestComplete.AddDynamic(this, &UAtlasFileManager::OnDownloadRequestComplete);
