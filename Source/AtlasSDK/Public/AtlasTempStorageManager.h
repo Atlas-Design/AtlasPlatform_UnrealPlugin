@@ -35,8 +35,9 @@ public:
 	static FString GetTempDirectorySizeFormatted();
 
 	/**
-	 * Delete all contents of the Atlas temp directories.
-	 * The directories themselves are preserved (recreated if absent).
+	 * Delete contents only in validated, Atlas-owned temp directories.
+	 * Empty/new directories receive an ownership marker; unmarked existing data is preserved.
+	 * Protected locations and linked paths are refused. Roots and ownership markers are kept.
 	 * @return Number of files deleted
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Atlas|TempStorage")

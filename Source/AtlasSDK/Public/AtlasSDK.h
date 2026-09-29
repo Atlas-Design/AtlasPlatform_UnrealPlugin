@@ -8,11 +8,12 @@
  * Atlas SDK Module
  * Provides core types and functionality for executing Atlas Platform workflows.
  */
-class FAtlasSDKModule : public IModuleInterface
+class ATLASSDK_API FAtlasSDKModule : public IModuleInterface
 {
 public:
 	/** IModuleInterface implementation */
 	virtual void StartupModule() override;
+	static void DrainFileWork();
 	virtual void ShutdownModule() override;
 
 	/**

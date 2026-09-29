@@ -1,6 +1,10 @@
 // Copyright Atlas Platform. All Rights Reserved.
 
 #include "AtlasHistoryManager.h"
+#include "AtlasWorkflowAsset.h"
+#include "JsonObjectConverter.h"
+#include "AtlasArchiveSafety.h"
+#include "AtlasLibraryProfiler.h"
 #include "AtlasJob.h"
 #include "AtlasOutputManager.h"
 #include "AtlasSDKSettings.h"
@@ -11,10 +15,69 @@
 #include "Serialization/JsonWriter.h"
 #include "Serialization/JsonSerializer.h"
 #include "Dom/JsonObject.h"
+#if WITH_EDITOR
+#include "DirectoryWatcherModule.h"
+#include "IDirectoryWatcher.h"
+#endif
+
+namespace
+{
+	// All managers in this process observe writes, including standalone job.json updates.
+	uint64 GAtlasHistoryRevision = 0;
+}
 
 UAtlasHistoryManager::UAtlasHistoryManager()
 {
 }
+
+void UAtlasHistoryManager::BeginDestroy()
+{
+#if WITH_EDITOR
+	ClearDirectoryWatches();
+#endif
+	Super::BeginDestroy();
+}
+
+#if WITH_EDITOR
+void UAtlasHistoryManager::ClearDirectoryWatches()
+{
+	if (FDirectoryWatcherModule* Module = FModuleManager::GetModulePtr<FDirectoryWatcherModule>(TEXT("DirectoryWatcher")))
+	{
+		if (IDirectoryWatcher* Watcher = Module->Get())
+			for (const auto& Pair : DirectoryWatchHandles)
+				Watcher->UnregisterDirectoryChangedCallback_Handle(Pair.Key, Pair.Value);
+	}
+	DirectoryWatchHandles.Empty();
+}
+
+void UAtlasHistoryManager::UpdateDirectoryWatches(const FString& OutputRoot)
+{
+	// Re-arm after a rebuild: an external tool may have removed/recreated a watched root.
+	ClearDirectoryWatches();
+	IDirectoryWatcher* Watcher = FModuleManager::LoadModuleChecked<FDirectoryWatcherModule>(TEXT("DirectoryWatcher")).Get();
+	if (!Watcher) return;
+	for (const FString& Directory : {FPaths::ConvertRelativePathToFull(GetHistoryDirectory()), OutputRoot})
+	{
+		if (DirectoryWatchHandles.Contains(Directory) || !FPaths::DirectoryExists(Directory)) continue;
+		FDelegateHandle Handle;
+		const TWeakObjectPtr<UAtlasHistoryManager> WeakThis(this);
+		if (Watcher->RegisterDirectoryChangedCallback_Handle(Directory,
+			IDirectoryWatcher::FDirectoryChanged::CreateLambda([WeakThis](const TArray<FFileChangeData>& Changes)
+			{
+				for (const FFileChangeData& Change : Changes)
+				{
+					const FString Extension = FPaths::GetExtension(Change.Filename);
+					if (Change.Action == FFileChangeData::FCA_RescanRequired || Extension.IsEmpty() || Extension.Equals(TEXT("json"), ESearchCase::IgnoreCase))
+					{
+						if (WeakThis.IsValid()) WeakThis->RefreshHistory();
+						break;
+					}
+				}
+			}), Handle, IDirectoryWatcher::IncludeDirectoryChanges))
+			DirectoryWatchHandles.Add(Directory, Handle);
+	}
+}
+#endif
 
 // ==================== Save Operations ====================
 
@@ -55,43 +118,10 @@ bool UAtlasHistoryManager::SaveRecord(const FAtlasJobHistoryRecord& Record)
 		return false;
 	}
 
-	EnsureHistoryDirectoryExists();
-
-	FString FilePath = GetHistoryFilePath(RecordToSave.ApiId);
-
-	// Load existing records
-	TArray<FAtlasJobHistoryRecord> Records = LoadHistoryFile(FilePath);
-
-	// Check if record already exists (update) or is new (insert)
-	int32 ExistingIndex = Records.IndexOfByPredicate([&](const FAtlasJobHistoryRecord& R) {
-		return R.JobId == RecordToSave.JobId;
-	});
-
-	if (ExistingIndex != INDEX_NONE)
-	{
-		Records[ExistingIndex] = RecordToSave;
-	}
-	else
-	{
-		Records.Insert(RecordToSave, 0); // Insert at beginning (newest first)
-	}
-
-	// Update cache
-	HistoryCache.Add(RecordToSave.ApiId, Records);
-
-	// During the transition to per-run archives, keep writing the legacy
-	// per-workflow history array so existing Blueprint/UI paths keep working.
-	bool bSaved = SaveHistoryFile(FilePath, Records);
-	const bool bSavedJobJson = SaveRecordToJobJson(RecordToSave);
-	bSaved = bSaved && bSavedJobJson;
-
-	if (bSaved)
-	{
-		UE_LOG(LogTemp, Log, TEXT("AtlasHistoryManager: Saved job %s to history (%s)"),
-			*RecordToSave.JobId.ToString(EGuidFormats::DigitsWithHyphens), *RecordToSave.WorkflowName);
-	}
-
-	return bSaved;
+	// Per-job metadata is the sole commit point. Legacy arrays remain read-only migration inputs.
+	if (!SaveRecordToJobJson(RecordToSave)) return false;
+	HistoryCache.Remove(RecordToSave.ApiId);
+	return true;
 }
 
 bool UAtlasHistoryManager::SaveRecordToJobJson(const FAtlasJobHistoryRecord& Record)
@@ -105,7 +135,9 @@ bool UAtlasHistoryManager::SaveRecordToJobJson(const FAtlasJobHistoryRecord& Rec
 		return false;
 	}
 
-	if (RecordToSave.JobJsonPath.IsEmpty())
+	if (!AtlasArchive::IsContained(UAtlasSDKSettings::Get()->GetOutputFolderPath(), RecordToSave.JobJsonPath)
+		|| !AtlasArchive::IsContained(UAtlasSDKSettings::Get()->GetOutputFolderPath(), RecordToSave.InputsFolderPath)
+		|| !AtlasArchive::IsContained(UAtlasSDKSettings::Get()->GetOutputFolderPath(), RecordToSave.OutputsFolderPath))
 	{
 		UE_LOG(LogTemp, Warning, TEXT("AtlasHistoryManager: Cannot save job.json without a metadata path"));
 		return false;
@@ -142,18 +174,21 @@ bool UAtlasHistoryManager::SaveRecordToJobJson(const FAtlasJobHistoryRecord& Rec
 		return false;
 	}
 
-	if (!FFileHelper::SaveStringToFile(JsonString, *RecordToSave.JobJsonPath))
+	if (!AtlasArchive::WriteText(RecordToSave.JobJsonPath, JsonString))
 	{
 		UE_LOG(LogTemp, Error, TEXT("AtlasHistoryManager: Failed to save job.json: %s"), *RecordToSave.JobJsonPath);
 		return false;
 	}
 
+	++GAtlasHistoryRevision;
 	return true;
 }
 
 bool UAtlasHistoryManager::LoadRecordFromJobJson(const FString& JobJsonPath, FAtlasJobHistoryRecord& OutRecord)
 {
+	FAtlasLibraryProfileScope Profile(TEXT("History.ReadJobJson"));
 	OutRecord = FAtlasJobHistoryRecord();
+	if (!AtlasArchive::IsContained(UAtlasSDKSettings::Get()->GetOutputFolderPath(), JobJsonPath)) return false;
 
 	FString JsonString;
 	if (!FFileHelper::LoadFileToString(JsonString, *JobJsonPath))
@@ -174,10 +209,11 @@ bool UAtlasHistoryManager::LoadRecordFromJobJson(const FString& JobJsonPath, FAt
 		return false;
 	}
 
-	if (OutRecord.JobJsonPath.IsEmpty())
-	{
-		OutRecord.JobJsonPath = JobJsonPath;
-	}
+	// The file being read defines its archive location; stored absolute paths cannot redirect it.
+	OutRecord.JobJsonPath = JobJsonPath;
+	OutRecord.JobFolderPath = FPaths::GetPath(JobJsonPath);
+	OutRecord.InputsFolderPath = OutRecord.JobFolderPath / TEXT("inputs");
+	OutRecord.OutputsFolderPath = OutRecord.JobFolderPath / TEXT("outputs");
 	PopulateRunArchivePaths(OutRecord);
 	return true;
 }
@@ -194,101 +230,26 @@ TArray<FAtlasJobHistoryRecord> UAtlasHistoryManager::GetHistoryForWorkflow(const
 
 TArray<FAtlasJobHistoryRecord> UAtlasHistoryManager::QueryHistory(const FAtlasHistoryQuery& Query)
 {
+	FAtlasLibraryProfileScope Profile(TEXT("History.Query"));
+	EnsureHistoryIndex();
 	TArray<FAtlasJobHistoryRecord> Results;
-	TMap<FGuid, FAtlasJobHistoryRecord> RecordsByJobId;
-
-	// Determine which files to search
-	TArray<FString> ApiIds;
-	if (Query.ApiId.IsEmpty())
+	const int32 Offset = FMath::Max(0, Query.Offset);
+	TArray<const FAtlasJobHistoryRecord*> Visible;
+	TMap<FString, int32> VisibleCounts;
+	const UAtlasSDKSettings* Settings = UAtlasSDKSettings::Get();
+	for (const auto& Record : IndexedRecords)
 	{
-		// Search all workflows
-		ApiIds = GetWorkflowsWithHistory();
+		if (Settings->bLimitVisibleHistory && Settings->MaxHistoryRecordsPerWorkflow > 0
+			&& Record.Status != EAtlasJobStatus::Running
+			&& ++VisibleCounts.FindOrAdd(Record.ApiId) > Settings->MaxHistoryRecordsPerWorkflow) continue;
+		if (Query.Matches(Record)) Visible.Add(&Record);
 	}
-	else
+	for (int32 Position = Offset; Position < Visible.Num(); ++Position)
 	{
-		ApiIds.Add(Query.ApiId);
+		const int32 Index = Query.bNewestFirst ? Position : Visible.Num() - 1 - Position;
+		Results.Add(*Visible[Index]);
+		if (Query.Limit > 0 && Results.Num() >= Query.Limit) break;
 	}
-
-	// Collect all matching records
-	for (const FString& ApiId : ApiIds)
-	{
-		// Check cache first
-		if (TArray<FAtlasJobHistoryRecord>* CachedRecords = HistoryCache.Find(ApiId))
-		{
-			for (const FAtlasJobHistoryRecord& Record : *CachedRecords)
-			{
-				if (Record.IsValid())
-				{
-					RecordsByJobId.FindOrAdd(Record.JobId) = Record;
-				}
-			}
-		}
-		else
-		{
-			FString FilePath = GetHistoryFilePath(ApiId);
-			TArray<FAtlasJobHistoryRecord> LoadedRecords = LoadHistoryFile(FilePath);
-			HistoryCache.Add(ApiId, LoadedRecords);
-			for (const FAtlasJobHistoryRecord& Record : LoadedRecords)
-			{
-				if (Record.IsValid())
-				{
-					RecordsByJobId.FindOrAdd(Record.JobId) = Record;
-				}
-			}
-		}
-	}
-
-	// Per-run job.json is the new source of truth. It intentionally overwrites
-	// legacy records for the same JobId during this transition period.
-	TArray<FAtlasJobHistoryRecord> JobJsonRecords = LoadJobJsonRecords(Query.ApiId);
-	for (const FAtlasJobHistoryRecord& Record : JobJsonRecords)
-	{
-		if (Record.IsValid())
-		{
-			RecordsByJobId.Add(Record.JobId, Record);
-		}
-	}
-
-	// Filter by query
-	for (const auto& Pair : RecordsByJobId)
-	{
-		const FAtlasJobHistoryRecord& Record = Pair.Value;
-		if (Query.Matches(Record))
-		{
-			Results.Add(Record);
-		}
-	}
-
-	// Sort by completion date
-	Results.Sort([&Query](const FAtlasJobHistoryRecord& A, const FAtlasJobHistoryRecord& B) {
-		if (Query.bNewestFirst)
-		{
-			return A.CompletedAt > B.CompletedAt;
-		}
-		else
-		{
-			return A.CompletedAt < B.CompletedAt;
-		}
-	});
-
-	// Apply pagination
-	if (Query.Offset > 0)
-	{
-		if (Query.Offset >= Results.Num())
-		{
-			Results.Empty();
-		}
-		else
-		{
-			Results.RemoveAt(0, Query.Offset);
-		}
-	}
-
-	if (Query.Limit > 0 && Results.Num() > Query.Limit)
-	{
-		Results.SetNum(Query.Limit);
-	}
-
 	return Results;
 }
 
@@ -301,20 +262,24 @@ TArray<FAtlasJobHistoryRecord> UAtlasHistoryManager::GetAllHistory()
 
 int32 UAtlasHistoryManager::GetHistoryCount(const FAtlasHistoryQuery& Query)
 {
-	// Use a modified query with no pagination
-	FAtlasHistoryQuery CountQuery = Query;
-	CountQuery.Offset = 0;
-	CountQuery.Limit = 0;
-
-	TArray<FAtlasJobHistoryRecord> Results = QueryHistory(CountQuery);
-	return Results.Num();
+	EnsureHistoryIndex();
+	const UAtlasSDKSettings* Settings = UAtlasSDKSettings::Get();
+	TMap<FString, int32> VisibleCounts;
+	int32 Count = 0;
+	for (const auto& Record : IndexedRecords)
+	{
+		if (Settings->bLimitVisibleHistory && Settings->MaxHistoryRecordsPerWorkflow > 0
+			&& Record.Status != EAtlasJobStatus::Running && ++VisibleCounts.FindOrAdd(Record.ApiId) > Settings->MaxHistoryRecordsPerWorkflow) continue;
+		if (Query.Matches(Record)) ++Count;
+	}
+	return Count;
 }
 
 bool UAtlasHistoryManager::FindRecord(const FGuid& JobId, FAtlasJobHistoryRecord& OutRecord)
 {
-	TArray<FAtlasJobHistoryRecord> AllRecords = GetAllHistory();
+	EnsureHistoryIndex();
 
-	for (const FAtlasJobHistoryRecord& Record : AllRecords)
+	for (const FAtlasJobHistoryRecord& Record : IndexedRecords)
 	{
 		if (Record.JobId == JobId)
 		{
@@ -330,113 +295,103 @@ bool UAtlasHistoryManager::FindRecord(const FGuid& JobId, FAtlasJobHistoryRecord
 
 void UAtlasHistoryManager::ClearHistory(const FString& ApiId)
 {
-	IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
-
-	if (ApiId.IsEmpty())
+	EnsureHistoryIndex();
+	const TArray<FAtlasJobHistoryRecord> Records = IndexedRecords;
+	for (const auto& Record : Records)
 	{
-		// Clear all history
-		FString HistoryDir = GetHistoryDirectory();
-		TArray<FString> Files;
-		PlatformFile.FindFiles(Files, *HistoryDir, TEXT("json"));
-
-		for (const FString& File : Files)
-		{
-			PlatformFile.DeleteFile(*File);
-		}
-
-		HistoryCache.Empty();
-		UE_LOG(LogTemp, Log, TEXT("AtlasHistoryManager: Cleared all history (%d files)"), Files.Num());
-	}
-	else
-	{
-		// Clear specific workflow
-		FString FilePath = GetHistoryFilePath(ApiId);
-		if (PlatformFile.DeleteFile(*FilePath))
-		{
-			HistoryCache.Remove(ApiId);
-			UE_LOG(LogTemp, Log, TEXT("AtlasHistoryManager: Cleared history for %s"), *ApiId);
-		}
+		if (!ApiId.IsEmpty() && Record.ApiId != ApiId) continue;
+		if (!DeleteRecord(Record.JobId)) UE_LOG(LogTemp, Error, TEXT("Atlas: Failed to hide history record %s"), *Record.JobId.ToString());
 	}
 }
 
 bool UAtlasHistoryManager::DeleteRecord(const FGuid& JobId)
 {
-	// Find which file contains this record
-	TArray<FString> ApiIds = GetWorkflowsWithHistory();
-
-	for (const FString& ApiId : ApiIds)
-	{
-		TArray<FAtlasJobHistoryRecord>& Records = HistoryCache.FindOrAdd(ApiId);
-		if (Records.Num() == 0)
-		{
-			Records = LoadHistoryFile(GetHistoryFilePath(ApiId));
-		}
-
-		int32 Index = Records.IndexOfByPredicate([&](const FAtlasJobHistoryRecord& R) {
-			return R.JobId == JobId;
-		});
-
-		if (Index != INDEX_NONE)
-		{
-			Records.RemoveAt(Index);
-			SaveHistoryFile(GetHistoryFilePath(ApiId), Records);
-			UE_LOG(LogTemp, Log, TEXT("AtlasHistoryManager: Deleted record %s"),
-				*JobId.ToString(EGuidFormats::DigitsWithHyphens));
-			return true;
-		}
-	}
-
-	return false;
+	if (!JobId.IsValid()) return false;
+	// A durable tombstone wins over both stores, including stale writes by an in-flight job.
+	const FString Path = GetHistoryDirectory() / TEXT("Deleted") / (JobId.ToString(EGuidFormats::Digits) + TEXT(".json"));
+	if (!AtlasArchive::WriteText(Path, TEXT("{\"deleted\":true}"))) return false;
+	++GAtlasHistoryRevision;
+	HistoryCache.Empty();
+	return true;
 }
 
 TArray<FString> UAtlasHistoryManager::GetWorkflowsWithHistory()
 {
-	TSet<FString> UniqueApiIds;
-
-	FString HistoryDir = GetHistoryDirectory();
-	IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
-
-	TArray<FString> Files;
-	PlatformFile.FindFiles(Files, *HistoryDir, TEXT("json"));
-
-	for (const FString& FilePath : Files)
-	{
-		FString FileName = FPaths::GetBaseFilename(FilePath);
-		UniqueApiIds.Add(FileName);
-	}
-
-	for (const FAtlasJobHistoryRecord& Record : LoadJobJsonRecords())
-	{
-		if (!Record.ApiId.IsEmpty())
-		{
-			UniqueApiIds.Add(Record.ApiId);
-		}
-	}
-
-	return UniqueApiIds.Array();
+	FAtlasLibraryProfileScope Profile(TEXT("History.WorkflowIds"));
+	EnsureHistoryIndex();
+	return IndexedWorkflowIds;
 }
 
 TArray<FAtlasWorkflowInfo> UAtlasHistoryManager::GetWorkflowInfoWithHistory()
 {
-	TArray<FAtlasWorkflowInfo> Result;
+	FAtlasLibraryProfileScope Profile(TEXT("History.WorkflowInfo"));
+	EnsureHistoryIndex();
+	return IndexedWorkflowInfo;
+}
 
-	TArray<FString> ApiIds = GetWorkflowsWithHistory();
+void UAtlasHistoryManager::RefreshHistory()
+{
+	++GAtlasHistoryRevision;
+}
 
-	for (const FString& ApiId : ApiIds)
+void UAtlasHistoryManager::EnsureHistoryIndex()
+{
+	const FString OutputRoot = UAtlasSDKSettings::Get()->GetOutputFolderPath();
+	if (IndexedRevision == GAtlasHistoryRevision && IndexedOutputRoot == OutputRoot) return;
+	FAtlasLibraryProfileScope Profile(TEXT("History.BuildIndex"));
+	AtlasArchive::FScopedPathChecks PathChecks;
+#if WITH_EDITOR
+	UpdateDirectoryWatches(OutputRoot);
+#endif
+	TMap<FGuid, FAtlasJobHistoryRecord> RecordsById;
+	TSet<FString> WorkflowIds;
+	HistoryCache.Empty();
+	TArray<FString> LegacyFiles;
+	IFileManager::Get().FindFiles(LegacyFiles, *(GetHistoryDirectory() / TEXT("*.json")), true, false);
+	for (const FString& File : LegacyFiles)
 	{
-		// Load the first record from this workflow's history to get the name
-		TArray<FAtlasJobHistoryRecord> Records = GetHistoryForWorkflow(ApiId);
-		
-		FString DisplayName = ApiId; // Fallback to API ID if no records
-		if (Records.Num() > 0)
+		const FString ApiId = FPaths::GetBaseFilename(File);
+		WorkflowIds.Add(ApiId); // Preserve even an empty legacy workflow file in the dropdown.
+		TArray<FAtlasJobHistoryRecord> Records = LoadHistoryFile(GetHistoryDirectory() / File);
+		for (const FAtlasJobHistoryRecord& Record : Records)
 		{
-			DisplayName = Records[0].WorkflowName;
+			if (Record.IsValid()) RecordsById.Add(Record.JobId, Record);
 		}
-
-		Result.Add(FAtlasWorkflowInfo(ApiId, DisplayName));
+		HistoryCache.Add(ApiId, MoveTemp(Records));
 	}
-
-	return Result;
+	// Preserve the existing per-job-over-legacy precedence for duplicate GUIDs.
+	for (const FAtlasJobHistoryRecord& Record : LoadJobJsonRecords())
+	{
+		if (!Record.IsValid()) continue;
+		WorkflowIds.Add(Record.ApiId);
+		RecordsById.Add(Record.JobId, Record);
+	}
+	TArray<FString> DeletedIds;
+	IFileManager::Get().FindFiles(DeletedIds, *(GetHistoryDirectory() / TEXT("Deleted/*.json")), true, false);
+	for (const FString& File : DeletedIds)
+	{
+		FGuid Id;
+		if (FGuid::Parse(FPaths::GetBaseFilename(File), Id)) RecordsById.Remove(Id);
+	}
+	RecordsById.GenerateValueArray(IndexedRecords);
+	IndexedRecords.Sort([](const FAtlasJobHistoryRecord& A, const FAtlasJobHistoryRecord& B)
+	{
+		return A.CompletedAt > B.CompletedAt;
+	});
+	IndexedWorkflowIds = WorkflowIds.Array();
+	TMap<FString, FString> LatestNames;
+	for (const FAtlasJobHistoryRecord& Record : IndexedRecords)
+	{
+		if (!LatestNames.Contains(Record.ApiId)) LatestNames.Add(Record.ApiId, Record.WorkflowName);
+	}
+	IndexedWorkflowInfo.Reset(IndexedWorkflowIds.Num());
+	for (const FString& ApiId : IndexedWorkflowIds)
+	{
+		const FString* Name = LatestNames.Find(ApiId);
+		IndexedWorkflowInfo.Emplace(ApiId, Name ? *Name : ApiId);
+	}
+	IndexedOutputRoot = OutputRoot;
+	IndexedRevision = GAtlasHistoryRevision;
 }
 
 // ==================== Batch History Queries ====================
@@ -536,6 +491,7 @@ TArray<FAtlasBatchSummary> UAtlasHistoryManager::QueryBatchSummaries()
 
 int32 UAtlasHistoryManager::ReconcileStaleJobs(int32 ThresholdHours)
 {
+	FAtlasLibraryProfileScope Profile(TEXT("History.Reconcile"));
 	if (ThresholdHours <= 0)
 	{
 		if (const UAtlasSDKSettings* Settings = UAtlasSDKSettings::Get())
@@ -548,82 +504,18 @@ int32 UAtlasHistoryManager::ReconcileStaleJobs(int32 ThresholdHours)
 		}
 	}
 
-	const FDateTime CutoffTime = FDateTime::Now() - FTimespan::FromHours(ThresholdHours);
+	EnsureHistoryIndex();
+	const TArray<FAtlasJobHistoryRecord> Records = IndexedRecords;
 	int32 ReconciledCount = 0;
-	TSet<FGuid> ReconciledJobIds;
-
-	TArray<FString> ApiIds = GetWorkflowsWithHistory();
-
-	for (const FString& ApiId : ApiIds)
+	for (FAtlasJobHistoryRecord Record : Records)
 	{
-		FString FilePath = GetHistoryFilePath(ApiId);
-		TArray<FAtlasJobHistoryRecord> Records = LoadHistoryFile(FilePath);
-		bool bModified = false;
-
-		for (FAtlasJobHistoryRecord& Record : Records)
-		{
-			if (Record.Status == EAtlasJobStatus::Running && Record.StartedAt < CutoffTime)
-			{
-				Record.Status = EAtlasJobStatus::Failed;
-				Record.ErrorMessage = FString::Printf(
-					TEXT("Job was still running after %d hours — likely interrupted by editor crash or shutdown"),
-					ThresholdHours);
-				Record.CompletedAt = FDateTime::Now();
-				Record.DurationSeconds = (Record.CompletedAt - Record.StartedAt).GetTotalSeconds();
-				bModified = true;
-				ReconciledCount++;
-				ReconciledJobIds.Add(Record.JobId);
-
-				UE_LOG(LogTemp, Warning, TEXT("AtlasHistoryManager: Reconciled stale job %s (%s) — started %s"),
-					*Record.JobId.ToString(EGuidFormats::DigitsWithHyphens),
-					*Record.WorkflowName,
-					*Record.StartedAt.ToString());
-			}
-		}
-
-		if (bModified)
-		{
-			HistoryCache.Add(ApiId, Records);
-			SaveHistoryFile(FilePath, Records);
-			for (const FAtlasJobHistoryRecord& Record : Records)
-			{
-				if (Record.Status != EAtlasJobStatus::Running && !Record.JobJsonPath.IsEmpty())
-				{
-					SaveRecordToJobJson(Record);
-				}
-			}
-		}
-	}
-
-	TArray<FAtlasJobHistoryRecord> JobJsonRecords = LoadJobJsonRecords();
-	for (FAtlasJobHistoryRecord& Record : JobJsonRecords)
-	{
-		if (ReconciledJobIds.Contains(Record.JobId))
-		{
-			continue;
-		}
-
-		if (Record.Status == EAtlasJobStatus::Running && Record.StartedAt < CutoffTime)
-		{
-			Record.Status = EAtlasJobStatus::Failed;
-			Record.ErrorMessage = FString::Printf(
-				TEXT("Job was still running after %d hours — likely interrupted by editor crash or shutdown"),
-				ThresholdHours);
-			Record.CompletedAt = FDateTime::Now();
-			Record.DurationSeconds = (Record.CompletedAt - Record.StartedAt).GetTotalSeconds();
-			SaveRecord(Record);
-			ReconciledCount++;
-
-			UE_LOG(LogTemp, Warning, TEXT("AtlasHistoryManager: Reconciled stale job.json record %s (%s) — started %s"),
-				*Record.JobId.ToString(EGuidFormats::DigitsWithHyphens),
-				*Record.WorkflowName,
-				*Record.StartedAt.ToString());
-		}
-	}
-
-	if (ReconciledCount > 0)
-	{
-		UE_LOG(LogTemp, Log, TEXT("AtlasHistoryManager: Reconciled %d stale running job(s)"), ReconciledCount);
+		const FDateTime Now = Record.TimeBasis == TEXT("UTC") ? FDateTime::UtcNow() : FDateTime::Now();
+		if (Record.Status != EAtlasJobStatus::Running || Record.StartedAt >= Now - FTimespan::FromHours(ThresholdHours)) continue;
+		Record.Status = EAtlasJobStatus::Failed;
+		Record.ErrorMessage = FString::Printf(TEXT("Job was still running after %d hours; likely interrupted by editor shutdown"), ThresholdHours);
+		Record.CompletedAt = Now;
+		Record.DurationSeconds = FMath::Max(0.0, (Now - Record.StartedAt).GetTotalSeconds());
+		if (SaveRecord(Record)) ++ReconciledCount;
 	}
 
 	return ReconciledCount;
@@ -633,12 +525,15 @@ int32 UAtlasHistoryManager::ReconcileStaleJobs(int32 ThresholdHours)
 
 FString UAtlasHistoryManager::GetHistoryDirectory() const
 {
+#if WITH_DEV_AUTOMATION_TESTS
+	if (!TestHistoryDirectory.IsEmpty()) return TestHistoryDirectory;
+#endif
 	return FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Atlas"), TEXT("History"));
 }
 
 FString UAtlasHistoryManager::GetHistoryFilePath(const FString& ApiId) const
 {
-	return FPaths::Combine(GetHistoryDirectory(), ApiId + TEXT(".json"));
+	return FPaths::Combine(GetHistoryDirectory(), (ApiId == FPaths::GetCleanFilename(ApiId) && !ApiId.Contains(TEXT(":")) && !ApiId.Contains(TEXT("..")) ? ApiId : AtlasArchive::Component(ApiId)) + TEXT(".json"));
 }
 
 void UAtlasHistoryManager::EnsureHistoryDirectoryExists()
@@ -658,6 +553,10 @@ FAtlasJobHistoryRecord UAtlasHistoryManager::JobToRecord(UAtlasJob* Job)
 {
 	FAtlasJobHistoryRecord Record;
 
+	Record.TimeBasis = TEXT("UTC");
+	Record.OutputWarnings = Job->OutputWarnings;
+	if (UAtlasWorkflowAsset* Workflow = Job->GetExecutionWorkflow())
+		FJsonObjectConverter::UStructToJsonObjectString(Workflow->GetSchema(), Record.WorkflowSchemaJson);
 	Record.JobId = Job->JobId;
 	Record.ApiId = Job->ApiId;
 	Record.WorkflowName = Job->WorkflowName;
@@ -668,6 +567,9 @@ FAtlasJobHistoryRecord UAtlasHistoryManager::JobToRecord(UAtlasJob* Job)
 	// Map job state to history status
 	switch (Job->State)
 	{
+	case EAtlasJobState::Running:
+		Record.Status = EAtlasJobStatus::Running;
+		break;
 	case EAtlasJobState::Completed:
 		Record.Status = EAtlasJobStatus::Success;
 		break;
@@ -679,29 +581,11 @@ FAtlasJobHistoryRecord UAtlasHistoryManager::JobToRecord(UAtlasJob* Job)
 		break;
 	}
 
-	// Copy inputs (without raw file bytes - store paths/FileIds instead)
-	Record.Inputs = Job->Inputs;
-	for (auto& Pair : Record.Inputs.Values)
+	for (const auto& Pair : Job->Inputs.Values) Record.Inputs.Values.Add(Pair.Key, Pair.Value.WithoutFileData());
+	for (const auto& Pair : Job->Outputs.Values)
 	{
-		// Clear file bytes from inputs (store path/FileId only)
-		Pair.Value.FileData.Empty();
-	}
-
-	// Copy outputs (without raw file bytes - store FileIds instead)
-	Record.Outputs = Job->Outputs;
-	for (auto& Pair : Record.Outputs.Values)
-	{
-		const FString& OutputName = Pair.Key;
-		FAtlasValue& OutputValue = Pair.Value;
-
-		// Clear file bytes from outputs (store FileId only)
-		OutputValue.FileData.Empty();
-
-		// Capture saved file paths in OutputFilePaths map
-		if (!OutputValue.FilePath.IsEmpty())
-		{
-			Record.OutputFilePaths.Add(OutputName, OutputValue.FilePath);
-		}
+		Record.Outputs.Values.Add(Pair.Key, Pair.Value.WithoutFileData());
+		if (!Pair.Value.FilePath.IsEmpty()) Record.OutputFilePaths.Add(Pair.Key, Pair.Value.FilePath);
 	}
 
 	// Copy error message
@@ -716,6 +600,7 @@ FAtlasJobHistoryRecord UAtlasHistoryManager::JobToRecord(UAtlasJob* Job)
 
 	// Copy retry lineage
 	Record.RetryOfJobId = Job->RetryOfJobId;
+	Record.ExecutionId = Job->ExecutionId;
 
 	PopulateRunArchivePaths(Record);
 
@@ -771,7 +656,9 @@ void UAtlasHistoryManager::PopulateRunArchivePaths(FAtlasJobHistoryRecord& Recor
 
 TArray<FAtlasJobHistoryRecord> UAtlasHistoryManager::LoadHistoryFile(const FString& FilePath)
 {
+	FAtlasLibraryProfileScope Profile(TEXT("History.ReadLegacy"));
 	TArray<FAtlasJobHistoryRecord> Records;
+	if (!AtlasArchive::IsContained(GetHistoryDirectory(), FilePath)) return Records;
 
 	FString JsonString;
 	if (!FFileHelper::LoadFileToString(JsonString, *FilePath))
@@ -814,6 +701,7 @@ TArray<FAtlasJobHistoryRecord> UAtlasHistoryManager::LoadHistoryFile(const FStri
 
 TArray<FAtlasJobHistoryRecord> UAtlasHistoryManager::LoadJobJsonRecords(const FString& ApiIdFilter)
 {
+	FAtlasLibraryProfileScope Profile(TEXT("History.ScanArchives"));
 	TArray<FAtlasJobHistoryRecord> Records;
 
 	UAtlasOutputManager* OutputManager = NewObject<UAtlasOutputManager>(this);
@@ -829,15 +717,21 @@ TArray<FAtlasJobHistoryRecord> UAtlasHistoryManager::LoadJobJsonRecords(const FS
 	}
 
 	TArray<FString> JobJsonFiles;
-	IFileManager::Get().FindFilesRecursive(
-		JobJsonFiles,
-		*OutputRoot,
-		TEXT("job.json"),
-		true,
-		false,
-		false
-	);
+	TArray<FString> Directories{ OutputRoot };
+	for (int32 Index = 0; Index < Directories.Num(); ++Index)
+	{
+		const FString Directory = Directories[Index];
+		IPlatformFile::GetPlatformPhysical().IterateDirectory(*Directory, [&](const TCHAR* Path, bool bDirectory)
+		{
+			if (!AtlasArchive::IsContained(OutputRoot, Path)) return true;
+			if (bDirectory) Directories.Add(Path);
+			else if (FPaths::GetCleanFilename(Path) == TEXT("job.json")) JobJsonFiles.Add(Path);
+			return true;
+		});
+	}
 
+
+	FAtlasLibraryProfiler::Add(TEXT("History.ArchiveFilesFound"), 0, JobJsonFiles.Num());
 	for (const FString& JobJsonPath : JobJsonFiles)
 	{
 		FAtlasJobHistoryRecord Record;
@@ -855,6 +749,7 @@ TArray<FAtlasJobHistoryRecord> UAtlasHistoryManager::LoadJobJsonRecords(const FS
 
 bool UAtlasHistoryManager::SaveHistoryFile(const FString& FilePath, const TArray<FAtlasJobHistoryRecord>& Records)
 {
+	++GAtlasHistoryRevision;
 	TArray<TSharedPtr<FJsonValue>> JsonArray;
 
 	for (const FAtlasJobHistoryRecord& Record : Records)
@@ -875,7 +770,7 @@ bool UAtlasHistoryManager::SaveHistoryFile(const FString& FilePath, const TArray
 		return false;
 	}
 
-	if (!FFileHelper::SaveStringToFile(JsonString, *FilePath))
+	if (!AtlasArchive::WriteText(FilePath, JsonString))
 	{
 		UE_LOG(LogTemp, Error, TEXT("AtlasHistoryManager: Failed to save history file: %s"), *FilePath);
 		return false;
@@ -887,9 +782,16 @@ bool UAtlasHistoryManager::SaveHistoryFile(const FString& FilePath, const TArray
 TSharedPtr<FJsonObject> UAtlasHistoryManager::RecordToJson(const FAtlasJobHistoryRecord& Record)
 {
 	TSharedPtr<FJsonObject> Json = MakeShared<FJsonObject>();
+	Json->SetNumberField(TEXT("archiveVersion"), 2);
+	Json->SetStringField(TEXT("timeBasis"), Record.TimeBasis.IsEmpty() ? TEXT("legacy-unknown") : Record.TimeBasis);
+	Json->SetStringField(TEXT("workflowSchema"), Record.WorkflowSchemaJson);
+	TArray<TSharedPtr<FJsonValue>> Warnings;
+	for (const FString& Warning : Record.OutputWarnings) Warnings.Add(MakeShared<FJsonValueString>(Warning));
+	Json->SetArrayField(TEXT("outputWarnings"), Warnings);
 
 	Json->SetStringField(TEXT("jobId"), Record.JobId.ToString(EGuidFormats::DigitsWithHyphens));
 	Json->SetStringField(TEXT("apiId"), Record.ApiId);
+	Json->SetStringField(TEXT("executionId"), Record.ExecutionId);
 	Json->SetStringField(TEXT("workflowName"), Record.WorkflowName);
 	Json->SetStringField(TEXT("startedAt"), Record.StartedAt.ToIso8601());
 	Json->SetStringField(TEXT("completedAt"), Record.CompletedAt.ToIso8601());
@@ -935,11 +837,16 @@ TSharedPtr<FJsonObject> UAtlasHistoryManager::RecordToJson(const FAtlasJobHistor
 
 bool UAtlasHistoryManager::JsonToRecord(const TSharedPtr<FJsonObject>& JsonObj, FAtlasJobHistoryRecord& OutRecord)
 {
+	FAtlasLibraryProfileScope Profile(TEXT("History.ParseRecord"));
 	if (!JsonObj.IsValid())
 	{
 		return false;
 	}
 
+	OutRecord = FAtlasJobHistoryRecord();
+	JsonObj->TryGetStringField(TEXT("timeBasis"), OutRecord.TimeBasis);
+	JsonObj->TryGetStringField(TEXT("workflowSchema"), OutRecord.WorkflowSchemaJson);
+	JsonObj->TryGetStringArrayField(TEXT("outputWarnings"), OutRecord.OutputWarnings);
 	FString JobIdStr;
 	if (JsonObj->TryGetStringField(TEXT("jobId"), JobIdStr))
 	{
@@ -947,6 +854,8 @@ bool UAtlasHistoryManager::JsonToRecord(const TSharedPtr<FJsonObject>& JsonObj, 
 	}
 
 	JsonObj->TryGetStringField(TEXT("apiId"), OutRecord.ApiId);
+	OutRecord.ExecutionId.Empty();
+	JsonObj->TryGetStringField(TEXT("executionId"), OutRecord.ExecutionId);
 	JsonObj->TryGetStringField(TEXT("workflowName"), OutRecord.WorkflowName);
 
 	FString StartedAtStr, CompletedAtStr;
@@ -1020,6 +929,15 @@ bool UAtlasHistoryManager::JsonToRecord(const TSharedPtr<FJsonObject>& JsonObj, 
 		}
 	}
 
+	// Persisted paths are untrusted. Never restore a local path outside the configured archive.
+	const FString Root = UAtlasSDKSettings::Get()->GetOutputFolderPath();
+	for (FString* Path : { &OutRecord.JobFolderPath, &OutRecord.InputsFolderPath, &OutRecord.OutputsFolderPath, &OutRecord.JobJsonPath })
+		if (!Path->IsEmpty() && !AtlasArchive::IsContained(Root, *Path)) Path->Empty();
+	for (auto* Values : { &OutRecord.Inputs.Values, &OutRecord.Outputs.Values })
+		for (auto& Pair : *Values)
+			if (!Pair.Value.FilePath.IsEmpty() && !AtlasArchive::IsContained(Root, Pair.Value.FilePath)) Pair.Value.FilePath.Empty();
+	for (auto It = OutRecord.OutputFilePaths.CreateIterator(); It; ++It)
+		if (!AtlasArchive::IsContained(Root, It.Value())) It.RemoveCurrent();
 	return OutRecord.IsValid();
 }
 

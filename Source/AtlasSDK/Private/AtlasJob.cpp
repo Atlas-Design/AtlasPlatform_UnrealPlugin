@@ -1,6 +1,12 @@
 // Copyright Atlas Platform. All Rights Reserved.
 
 #include "AtlasJob.h"
+#include "AtlasFileWork.h"
+#include "Async/Async.h"
+#include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonReader.h"
+#include "AtlasArchiveSafety.h"
+#include "UObject/StrongObjectPtr.h"
 #include "AtlasWorkflowAsset.h"
 #include "AtlasFileManager.h"
 #include "AtlasHttpRequest.h"
@@ -9,12 +15,12 @@
 #include "AtlasPlatformAuth.h"
 #include "AtlasSDKSettings.h"
 #include "Types/AtlasErrorTypes.h"
-#include "Async/Async.h"
+#include "AtlasScheduling.h"
+#include "AtlasJobManager.h"
+#include "AtlasHistoryManager.h"
 #include "HAL/PlatformFileManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
-#include "TimerManager.h"
-#include "Engine/World.h"
 
 UAtlasJob::UAtlasJob()
 	: State(EAtlasJobState::Pending)
@@ -29,7 +35,7 @@ UAtlasJob::UAtlasJob()
 	, DownloadFailures(0)
 {
 	JobId = FGuid::NewGuid();
-	CreatedAt = FDateTime::Now();  // Use local time for display consistency
+	CreatedAt = FDateTime::UtcNow();  // UTC for newly written records
 }
 
 // ==================== Initialization ====================
@@ -46,6 +52,11 @@ void UAtlasJob::SetWorkflowAsset(UAtlasWorkflowAsset* InAsset)
 	WorkflowAsset = InAsset;
 }
 
+UAtlasWorkflowAsset* UAtlasJob::GetExecutionWorkflow() const
+{
+	return ExecutionWorkflow ? ExecutionWorkflow.Get() : WorkflowAsset.Get();
+}
+
 void UAtlasJob::SetFileManager(UAtlasFileManager* InFileManager)
 {
 	FileManager = InFileManager;
@@ -55,6 +66,7 @@ void UAtlasJob::SetFileManager(UAtlasFileManager* InFileManager)
 
 bool UAtlasJob::Execute()
 {
+	TStrongObjectPtr<UAtlasJob> KeepAlive(this);
 	// Can only execute from Pending state
 	if (State != EAtlasJobState::Pending)
 	{
@@ -71,7 +83,8 @@ bool UAtlasJob::Execute()
 	}
 
 	// Need a workflow asset to get URLs
-	if (!WorkflowAsset.IsValid())
+	if (!IsValid(GetExecutionWorkflow()) || !GetExecutionWorkflow()->IsValid()
+		|| GetExecutionWorkflow()->Schema.BaseUrl.IsEmpty() || GetExecutionWorkflow()->Schema.Version.IsEmpty())
 	{
 		FAtlasError NoAssetError;
 		NoAssetError.Code = EAtlasErrorCode::ValidationError;
@@ -102,8 +115,21 @@ bool UAtlasJob::Execute()
 		return false;
 	}
 
+	TArray<FString> ValidationErrors;
+	if (!GetExecutionWorkflow()->GetSchema().ValidateInputs(Inputs, ValidationErrors))
+	{
+		FailWithError(FAtlasError(EAtlasErrorCode::ValidationError, FString::Join(ValidationErrors, TEXT("; "))));
+		return false;
+	}
+	ExecutionWorkflow = NewObject<UAtlasWorkflowAsset>(this);
+	ExecutionWorkflow->Schema = WorkflowAsset->Schema;
+	ExecutionWorkflow->bIsValid = WorkflowAsset->bIsValid;
+	FTCHARToUTF8 Key(*FAtlasPlatformAuth::GetResolvedApiKey());
+	ExecutionCredentialScope = FMD5::HashBytes(reinterpret_cast<const uint8*>(Key.Get()), Key.Length());
+	ExecutionRequestTimeout = UAtlasSDKSettings::Get()->RequestTimeoutSeconds;
+	StartedMonotonic = FPlatformTime::Seconds();
 	bExecutionStarted = true;
-	StartedAt = FDateTime::Now();  // Use local time for display consistency
+	StartedAt = FDateTime::UtcNow();  // UTC for newly written records
 
 	// Read poll interval and max execution time from project settings
 	if (const UAtlasSDKSettings* Settings = UAtlasSDKSettings::Get())
@@ -112,28 +138,28 @@ bool UAtlasJob::Execute()
 		MaxExecutionTimeSeconds = Settings->MaxExecutionTimeSeconds;
 	}
 
-	// Archive file-backed inputs before Running is broadcast so initial job.json
-	// points at the durable per-run inputs folder.
+	// The deadline includes queued preparation time. No UObject is accessed by the disk worker.
+	StartExecutionTimeout();
 	ArchiveInputFilesToRunFolder();
+	return !IsFinished();
+}
 
+void UAtlasJob::ContinueExecution()
+{
+	if (!CheckExecutionCredentials()) return;
+	if (bCancellationRequested || IsFinished()) return;
 	// Transition to Running state
 	SetState(EAtlasJobState::Running);
+	if (IsFinished()) return;
 	SetPhase(EAtlasJobPhase::Initializing);
+	if (IsFinished()) return;
 	SetProgress(0.0f);
+	if (IsFinished()) return;
 
 	UE_LOG(LogTemp, Log, TEXT("AtlasJob[%s] started execution for workflow '%s' (poll=%.1fs, timeout=%.0fs)"),
 		*JobId.ToString(EGuidFormats::DigitsWithHyphens), *WorkflowName, PollIntervalSeconds, MaxExecutionTimeSeconds);
 
-	// Start execution timeout timer
-	if (MaxExecutionTimeSeconds > 0.0f && GWorld)
-	{
-		GWorld->GetTimerManager().SetTimer(
-			ExecutionTimeoutHandle,
-			FTimerDelegate::CreateUObject(this, &UAtlasJob::OnExecutionTimeout),
-			MaxExecutionTimeSeconds,
-			false
-		);
-	}
+
 
 	// Start the pipeline: scan inputs for files
 	ScanInputsForUploads();
@@ -149,54 +175,16 @@ bool UAtlasJob::Execute()
 		StartExecutePhase();
 	}
 
-	return true;
 }
 
 void UAtlasJob::Cancel()
 {
-	// Already in terminal state?
-	if (AtlasJobHelpers::IsTerminalState(State))
-	{
-		UE_LOG(LogTemp, Log, TEXT("AtlasJob::Cancel() called on already-finished job (state: %s)"),
-			*AtlasJobHelpers::StateToString(State));
-		return;
-	}
-
+	if (bFinishing || AtlasJobHelpers::IsTerminalState(State)) return;
 	bCancellationRequested = true;
-
-	UE_LOG(LogTemp, Log, TEXT("AtlasJob[%s] cancellation requested"),
-		*JobId.ToString(EGuidFormats::DigitsWithHyphens));
-
-	// If still pending, transition directly to cancelled
-	if (State == EAtlasJobState::Pending)
-	{
-		CompletedAt = FDateTime::Now();  // Use local time for display consistency
-		
-		Error.Code = EAtlasErrorCode::Cancelled;
-		Error.Message = TEXT("Job was cancelled before execution started");
-		Error.Timestamp = CompletedAt;
-
-		SetState(EAtlasJobState::Cancelled);
-		OnFailed.Broadcast(this, Error);
-		return;
-	}
-
-	// Cancel any pending execute request
-	if (ExecuteRequest)
-	{
-		ExecuteRequest->CancelRequest();
-	}
-
-	// Cancel any pending status request
-	if (StatusRequest)
-	{
-		StatusRequest->CancelRequest();
-	}
-
-	// Mark as cancelled
 	FAtlasError CancelError;
 	CancelError.Code = EAtlasErrorCode::Cancelled;
-	CancelError.Message = TEXT("Job was cancelled during execution");
+	CancelError.Message = State == EAtlasJobState::Pending
+		? TEXT("Job was cancelled before execution started") : TEXT("Job was cancelled during execution");
 	CancelError.Timestamp = FDateTime::UtcNow();
 	FailWithError(CancelError);
 }
@@ -206,109 +194,57 @@ void UAtlasJob::Cancel()
 void UAtlasJob::ArchiveInputFilesToRunFolder()
 {
 	UAtlasOutputManager* OutputManager = NewObject<UAtlasOutputManager>(this);
-	if (!OutputManager)
+	const FAtlasJobFolderInfo Folder = OutputManager->GetJobFolderInfo(this);
+	struct FInputCopy { FString Name, Source, Destination; TArray<uint8> Bytes; };
+	TArray<FInputCopy> Copies;
+	for (const auto& Pair : Inputs.Values)
 	{
-		return;
+		const FAtlasValue& Value = Pair.Value;
+		if (!Value.IsFileType() || !Value.FileId.IsEmpty()) continue;
+		FString Extension = FPaths::GetExtension(Value.FilePath.IsEmpty() ? Value.FileName : Value.FilePath).ToLower();
+		bool bSafeExtension = !Extension.IsEmpty() && Extension.Len() <= 12;
+		for (TCHAR Ch : Extension) bSafeExtension &= FChar::IsAlnum(Ch);
+		if (!bSafeExtension) Extension = TEXT("bin");
+		const FString Destination = Folder.InputsDiskPath / (TEXT("Input_") + AtlasArchive::Component(Pair.Key) + TEXT(".") + Extension);
+		if (!AtlasArchive::IsContained(UAtlasSDKSettings::Get()->GetOutputFolderPath(), Destination))
+		{
+			FailWithError(FAtlasError(EAtlasErrorCode::FileError, TEXT("Unsafe input archive destination")));
+			return;
+		}
+		Copies.Add({Pair.Key, Value.FilePath, Destination, Value.FileData});
 	}
-
-	const FAtlasJobFolderInfo FolderInfo = OutputManager->GetJobFolderInfo(this);
-	if (!FolderInfo.IsValid() || FolderInfo.InputsDiskPath.IsEmpty())
+	if (Copies.IsEmpty()) { ContinueExecution(); return; }
+	const TWeakObjectPtr<UAtlasJob> WeakThis(this);
+	AtlasFileWork::Enqueue([WeakThis, Copies = MoveTemp(Copies)]() mutable
 	{
-		return;
-	}
-
-	IFileManager::Get().MakeDirectory(*FolderInfo.InputsDiskPath, true);
-
-	for (auto& Pair : Inputs.Values)
-	{
-		const FString& InputName = Pair.Key;
-		FAtlasValue& Value = Pair.Value;
-
-		if (!Value.IsFileType() || !Value.FileId.IsEmpty())
+		bool bSuccess = true;
+		for (FInputCopy& Copy : Copies)
 		{
-			continue;
-		}
-
-		const FString SourcePath = Value.FilePath;
-		const bool bHasSourceFile = !SourcePath.IsEmpty() && FPaths::FileExists(SourcePath);
-		const bool bHasInlineBytes = Value.FileData.Num() > 0;
-		if (!bHasSourceFile && !bHasInlineBytes)
-		{
-			if (!SourcePath.IsEmpty())
+			if (!Copy.Source.IsEmpty() && FPaths::FileExists(Copy.Source))
 			{
-				UE_LOG(LogTemp, Warning, TEXT("AtlasJob[%s] input '%s' source file is missing: %s"),
-					*JobId.ToString(EGuidFormats::DigitsWithHyphens), *InputName, *SourcePath);
+				Copy.Bytes.Empty();
+				if (!FFileHelper::LoadFileToArray(Copy.Bytes, *Copy.Source)) { bSuccess = false; break; }
 			}
-			continue;
+			if (Copy.Bytes.IsEmpty() || !AtlasArchive::WriteBytes(Copy.Destination, Copy.Bytes.GetData(), Copy.Bytes.Num())) { bSuccess = false; break; }
+			Copy.Bytes.Empty();
 		}
-
-		FString Extension;
-		if (bHasSourceFile)
+		AsyncTask(ENamedThreads::GameThread, [WeakThis, bSuccess, Copies = MoveTemp(Copies)]()
 		{
-			Extension = FPaths::GetExtension(SourcePath, true);
-		}
-		if (Extension.IsEmpty() && !Value.FileName.IsEmpty())
-		{
-			Extension = FPaths::GetExtension(Value.FileName, true);
-		}
-		if (Extension.IsEmpty())
-		{
-			switch (Value.Type)
+			TStrongObjectPtr<UAtlasJob> Job(WeakThis.Get());
+			if (!Job.IsValid() || Job->bCancellationRequested || Job->IsFinished()) return;
+			if (!bSuccess) { Job->FailWithError(FAtlasError(EAtlasErrorCode::FileError, TEXT("Could not archive input files"))); return; }
+			for (const FInputCopy& Copy : Copies)
 			{
-			case EAtlasValueType::Image:
-				Extension = TEXT(".png");
-				break;
-			case EAtlasValueType::Mesh:
-				Extension = TEXT(".glb");
-				break;
-			case EAtlasValueType::Audio:
-				Extension = TEXT(".mp3");
-				break;
-			default:
-				Extension = TEXT(".bin");
-				break;
+				if (FAtlasValue* Value = Job->Inputs.Values.Find(Copy.Name))
+				{
+					Value->FilePath = Copy.Destination;
+					Value->FileName = FPaths::GetCleanFilename(Copy.Destination);
+					Value->FileData.Empty();
+				}
 			}
-		}
-
-		const FString SafeInputName = UAtlasOutputManager::SanitizeParameterName(InputName);
-		const FString DestFileName = FString::Printf(TEXT("Input_%s%s"), *SafeInputName, *Extension);
-		const FString DestPath = FPaths::Combine(FolderInfo.InputsDiskPath, DestFileName);
-
-		bool bArchived = false;
-		if (bHasSourceFile)
-		{
-			FString NormalizedSource = FPaths::ConvertRelativePathToFull(SourcePath);
-			FString NormalizedDest = FPaths::ConvertRelativePathToFull(DestPath);
-			FPaths::NormalizeFilename(NormalizedSource);
-			FPaths::NormalizeFilename(NormalizedDest);
-
-			if (NormalizedSource.Equals(NormalizedDest, ESearchCase::IgnoreCase))
-			{
-				bArchived = true;
-			}
-			else
-			{
-				bArchived = (IFileManager::Get().Copy(*DestPath, *SourcePath, true, true) == COPY_OK);
-			}
-		}
-		else if (bHasInlineBytes)
-		{
-			bArchived = FFileHelper::SaveArrayToFile(Value.FileData, *DestPath);
-		}
-
-		if (bArchived)
-		{
-			Value.FilePath = DestPath;
-			Value.FileName = DestFileName;
-			UE_LOG(LogTemp, Log, TEXT("AtlasJob[%s] archived input '%s' to %s"),
-				*JobId.ToString(EGuidFormats::DigitsWithHyphens), *InputName, *DestPath);
-		}
-		else
-		{
-			UE_LOG(LogTemp, Warning, TEXT("AtlasJob[%s] failed to archive input '%s' to %s"),
-				*JobId.ToString(EGuidFormats::DigitsWithHyphens), *InputName, *DestPath);
-		}
-	}
+			Job->ContinueExecution();
+		});
+	});
 }
 
 void UAtlasJob::ScanInputsForUploads()
@@ -354,9 +290,11 @@ void UAtlasJob::ScanInputsForUploads()
 
 void UAtlasJob::StartUploadPhase()
 {
-	if (bCancellationRequested) return;
+	if (bCancellationRequested || AtlasJobHelpers::IsTerminalState(State)) return;
 
 	SetPhase(EAtlasJobPhase::Uploading);
+	// Phase listeners can cancel the job synchronously.
+	if (bCancellationRequested || AtlasJobHelpers::IsTerminalState(State)) return;
 	UploadsCompleted = 0;
 	UploadFailures = 0;
 	UploadOperations.Empty();
@@ -368,35 +306,36 @@ void UAtlasJob::StartUploadPhase()
 	FileManager->OnUploadComplete.AddDynamic(this, &UAtlasJob::HandleUploadComplete);
 	FileManager->OnUploadFailed.AddDynamic(this, &UAtlasJob::HandleUploadFailed);
 
-	// Start all uploads in parallel
-	for (const auto& Pair : FilesToUpload)
 	{
-		const FString& InputName = Pair.Key;
-		const FString& FilePath = Pair.Value;
-
-		// Use the FileManager to upload
-		FGuid OperationId = FileManager->UploadFile(WorkflowAsset.Get(), FilePath);
-
-		if (OperationId.IsValid())
+		TGuardValue<bool> StartingUploads(bStartingUploads, true);
+		// Start uploads in parallel, but stop dispatching after a synchronous failure/cancellation.
+		for (const auto& Pair : FilesToUpload)
 		{
+			if (bCancellationRequested || AtlasJobHelpers::IsTerminalState(State)) return;
+			const FString InputName = Pair.Key;
+			const FString FilePath = Pair.Value;
+			const FGuid OperationId = FGuid::NewGuid();
+			// Register BEFORE the call: request creation/ProcessRequest can fail synchronously.
 			UploadOperations.Add(OperationId, InputName);
-		}
-		else
-		{
-			UE_LOG(LogTemp, Error, TEXT("AtlasJob[%s] failed to start upload for '%s' from '%s'"),
-				*JobId.ToString(EGuidFormats::DigitsWithHyphens), *InputName, *FilePath);
-			
-			UploadsCompleted++;
-			UploadFailures++;
+			const FGuid StartedOperation = FileManager->UploadFileWithOperationId(GetExecutionWorkflow(), FilePath, OperationId);
+			if (!StartedOperation.IsValid() && !AtlasJobHelpers::IsTerminalState(State))
+			{
+				OnFileUploadFailed(OperationId,
+					TEXT("Upload could not start. Check the workflow and that the input file exists, is readable, and is not empty."),
+					0, InputName);
+				return;
+			}
 		}
 	}
 
+	if (bCancellationRequested || AtlasJobHelpers::IsTerminalState(State)) return;
 	UpdateOverallProgress();
 	CheckUploadPhaseComplete();
 }
 
-void UAtlasJob::OnFileUploadComplete(const FGuid& OperationId, const FString& FileId, const FString& InputName)
+void UAtlasJob::OnFileUploadComplete(const FGuid& OperationId, const FString& FileId, FString InputName)
 {
+	if (bCancellationRequested || AtlasJobHelpers::IsTerminalState(State)) return;
 	UE_LOG(LogTemp, Log, TEXT("AtlasJob[%s] upload complete for '%s': FileId=%s"),
 		*JobId.ToString(EGuidFormats::DigitsWithHyphens), *InputName, *FileId);
 
@@ -408,17 +347,21 @@ void UAtlasJob::OnFileUploadComplete(const FGuid& OperationId, const FString& Fi
 	CheckUploadPhaseComplete();
 }
 
-void UAtlasJob::OnFileUploadFailed(const FGuid& OperationId, const FString& ErrorMessage, int32 StatusCode, const FString& InputName)
+void UAtlasJob::OnFileUploadFailed(const FGuid& OperationId, const FString& ErrorMessage, int32 StatusCode, FString InputName)
 {
+	// InputName owns its characters: callers may pass a value from UploadOperations,
+	// whose storage is destroyed by Remove below.
+	if (bCancellationRequested || AtlasJobHelpers::IsTerminalState(State)) return;
 	UE_LOG(LogTemp, Error, TEXT("AtlasJob[%s] upload failed for '%s': %s (status %d)"),
-		*JobId.ToString(EGuidFormats::DigitsWithHyphens), *InputName, *ErrorMessage, StatusCode);
+		*JobId.ToString(EGuidFormats::DigitsWithHyphens), *InputName, TEXT("[details omitted]"), StatusCode);
 
 	UploadOperations.Remove(OperationId);
 	UploadsCompleted++;
 	UploadFailures++;
 
 	// Fail immediately on first upload error
-	FAtlasError UploadError;
+	FAtlasError UploadError = FAtlasError::FromHttpStatus(StatusCode, FileManager ? FileManager->GetTransferResponse(OperationId) : FString());
+	const FString BackendMessage = UploadError.RawResponse.IsEmpty() ? FString() : UploadError.Message;
 	if (StatusCode == 401)
 	{
 		UploadError.Code = EAtlasErrorCode::Unauthorized;
@@ -429,12 +372,13 @@ void UAtlasJob::OnFileUploadFailed(const FGuid& OperationId, const FString& Erro
 	}
 	else
 	{
-		UploadError.Code = EAtlasErrorCode::UploadFailed;
+		UploadError.Code = StatusCode > 0 ? FAtlasError::FromHttpStatus(StatusCode, FString()).Code : EAtlasErrorCode::UploadFailed;
 		UploadError.Message = FString::Printf(
 			TEXT("Failed to upload '%s': %s"),
 			*InputName,
 			*FAtlasPlatformAuth::GetHttpFailureMessage(StatusCode, ErrorMessage));
 	}
+	if (!BackendMessage.IsEmpty()) UploadError.Message = FString::Printf(TEXT("Failed to upload '%s': %s"), *InputName, *BackendMessage);
 	UploadError.HttpStatusCode = StatusCode;
 	UploadError.Timestamp = FDateTime::UtcNow();
 	FailWithError(UploadError);
@@ -442,7 +386,8 @@ void UAtlasJob::OnFileUploadFailed(const FGuid& OperationId, const FString& Erro
 
 void UAtlasJob::CheckUploadPhaseComplete()
 {
-	if (bCancellationRequested || AtlasJobHelpers::IsTerminalState(State))
+	if (bStartingUploads || Phase != EAtlasJobPhase::Uploading
+		|| bCancellationRequested || AtlasJobHelpers::IsTerminalState(State))
 	{
 		return;
 	}
@@ -473,10 +418,12 @@ void UAtlasJob::CheckUploadPhaseComplete()
 
 void UAtlasJob::StartExecutePhase()
 {
+	if (!CheckExecutionCredentials()) return;
 	if (bCancellationRequested) return;
 
 	SetPhase(EAtlasJobPhase::Executing);
 	UpdateOverallProgress();
+	if (bCancellationRequested || IsFinished()) return;
 
 	UE_LOG(LogTemp, Log, TEXT("AtlasJob[%s] starting execute phase"),
 		*JobId.ToString(EGuidFormats::DigitsWithHyphens));
@@ -494,10 +441,10 @@ void UAtlasJob::StartExecutePhase()
 	}
 
 	// Get the execute URL
-	FString ExecuteUrl = WorkflowAsset->GetExecuteUrl();
+	FString ExecuteUrl = GetExecutionWorkflow()->GetExecuteUrl();
 
 	UE_LOG(LogTemp, Log, TEXT("AtlasJob[%s] POSTing to: %s"),
-		*JobId.ToString(EGuidFormats::DigitsWithHyphens), *ExecuteUrl);
+		*JobId.ToString(EGuidFormats::DigitsWithHyphens), TEXT("[destination omitted]"));
 
 	// Create and configure the request
 	ExecuteRequest = UAtlasHttpRequest::CreateRequest();
@@ -508,12 +455,22 @@ void UAtlasJob::StartExecutePhase()
 	ExecuteRequest->SetRequestBodyJson(Payload);
 
 	FAtlasPlatformAuth::ApplyPlatformRequestSettings(ExecuteRequest);
+	ExecuteRequest->SetTimeout(ExecutionRequestTimeout);
 
 	// Bind callbacks
 	ExecuteRequest->OnRequestComplete.AddDynamic(this, &UAtlasJob::OnExecuteRequestComplete);
 	ExecuteRequest->OnRequestFailed.AddDynamic(this, &UAtlasJob::OnExecuteRequestFailed);
 
+	// Mark before dispatch, which may fail synchronously after the server accepted work.
+	bExecuteRequestSent = true;
 	// Execute
+#if WITH_DEV_AUTOMATION_TESTS
+	if (ExecuteRequestDispatcherForTests)
+	{
+		ExecuteRequestDispatcherForTests(ExecuteRequest);
+		return;
+	}
+#endif
 	ExecuteRequest->ProcessRequest();
 }
 
@@ -568,18 +525,11 @@ UAtlasJsonObject* UAtlasJob::BuildExecutePayload()
 			break;
 
 		case EAtlasValueType::Json:
-			// Parse and embed the JSON
 			{
-				UAtlasJsonObject* NestedJson = UAtlasJsonObject::FromJsonString(Value.JsonValue);
-				if (NestedJson)
-				{
-					Payload->SetObjectField(InputName, NestedJson);
-				}
-				else
-				{
-					// If parsing fails, send as string
-					Payload->SetStringField(InputName, Value.JsonValue);
-				}
+				TSharedPtr<FJsonValue> Json;
+				if (!FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Value.JsonValue), Json) || !Json.IsValid()
+					|| (Json->Type != EJson::Object && Json->Type != EJson::Array)) return nullptr;
+				Payload->GetJsonObject()->SetField(InputName, Json);
 			}
 			break;
 
@@ -590,7 +540,7 @@ UAtlasJsonObject* UAtlasJob::BuildExecutePayload()
 	}
 
 	UE_LOG(LogTemp, Log, TEXT("AtlasJob[%s] built payload: %s"),
-		*JobId.ToString(EGuidFormats::DigitsWithHyphens), *Payload->EncodeJson());
+		*JobId.ToString(EGuidFormats::DigitsWithHyphens), TEXT("[payload omitted]"));
 
 	return Payload;
 }
@@ -677,9 +627,9 @@ void UAtlasJob::OnExecuteRequestFailed(UAtlasHttpRequest* Request, const FString
 	}
 
 	UE_LOG(LogTemp, Error, TEXT("AtlasJob[%s] execute request failed: %s (status %d)"),
-		*JobId.ToString(EGuidFormats::DigitsWithHyphens), *ErrorMessage, StatusCode);
+		*JobId.ToString(EGuidFormats::DigitsWithHyphens), TEXT("[details omitted]"), StatusCode);
 
-	FAtlasError ExecError = FAtlasError::FromHttpStatus(StatusCode, FString());
+	FAtlasError ExecError = FAtlasError::FromHttpStatus(StatusCode, Request ? Request->GetResponseContent() : FString());
 	ExecError.HttpStatusCode = StatusCode;
 	ExecError.Timestamp = FDateTime::UtcNow();
 
@@ -689,8 +639,8 @@ void UAtlasJob::OnExecuteRequestFailed(UAtlasHttpRequest* Request, const FString
 	}
 	else
 	{
-		ExecError.Code = EAtlasErrorCode::NetworkError;
-		ExecError.Message = ErrorMessage;
+		if (StatusCode == 0) ExecError.Code = EAtlasErrorCode::NetworkError;
+		if (ExecError.RawResponse.IsEmpty()) ExecError.Message = ErrorMessage;
 	}
 
 	CleanupExecuteRequest();
@@ -703,6 +653,7 @@ void UAtlasJob::CleanupExecuteRequest()
 	{
 		ExecuteRequest->OnRequestComplete.RemoveDynamic(this, &UAtlasJob::OnExecuteRequestComplete);
 		ExecuteRequest->OnRequestFailed.RemoveDynamic(this, &UAtlasJob::OnExecuteRequestFailed);
+		ExecuteRequest->CancelRequest();
 		ExecuteRequest->RemoveFromRoot();
 		ExecuteRequest = nullptr;
 	}
@@ -710,40 +661,79 @@ void UAtlasJob::CleanupExecuteRequest()
 
 // ==================== Pipeline: Polling Phase ====================
 
+void UAtlasJob::BeginDestroy()
+{
+	AtlasScheduling::Cancel(ExecutionTimeoutHandle);
+	CleanupStatusRequest();
+	CleanupExecuteRequest();
+	Super::BeginDestroy();
+}
+
+void UAtlasJob::StartExecutionTimeout()
+{
+	AtlasScheduling::Cancel(ExecutionTimeoutHandle);
+	if (FMath::IsFinite(MaxExecutionTimeSeconds) && MaxExecutionTimeSeconds > 0.0f)
+	{
+		ExecutionTimeoutHandle = AtlasScheduling::Schedule(this, MaxExecutionTimeSeconds, [](UAtlasJob* Job)
+		{
+			Job->ExecutionTimeoutHandle.Reset();
+			Job->OnExecutionTimeout();
+		});
+	}
+}
+
 void UAtlasJob::StartPollingPhase(const FString& InExecutionId)
 {
-	if (bCancellationRequested) return;
-
+	if (bCancellationRequested || IsFinished()) return;
 	ExecutionId = InExecutionId;
-
-	UE_LOG(LogTemp, Log, TEXT("AtlasJob[%s] starting status polling for execution %s"),
-		*JobId.ToString(EGuidFormats::DigitsWithHyphens), *ExecutionId);
-
-	// Schedule first poll after delay
-	if (GWorld)
+	ConsecutivePollFailures = 0;
+	// Persist the accepted execution as soon as its identity is known, not only on completion.
+	if (UAtlasJobManager* Manager = GetTypedOuter<UAtlasJobManager>())
 	{
-		GWorld->GetTimerManager().SetTimer(
-			StatusPollTimerHandle,
-			FTimerDelegate::CreateUObject(this, &UAtlasJob::PollStatus),
-			PollIntervalSeconds,
-			false // Not looping - we'll reschedule after each poll
-		);
+		Manager->GetHistoryManager()->SaveJobToHistory(this);
 	}
-	else
+	SchedulePoll(PollIntervalSeconds);
+}
+
+void UAtlasJob::SchedulePoll(float DelaySeconds)
+{
+	AtlasScheduling::Cancel(StatusPollTimerHandle);
+	if (bCancellationRequested || IsFinished()) return;
+	const float SafeDelay = FMath::IsFinite(DelaySeconds) ? FMath::Max(0.1f, DelaySeconds) : 5.0f;
+	StatusPollTimerHandle = AtlasScheduling::Schedule(this, SafeDelay, [](UAtlasJob* Job)
 	{
-		// Fallback: poll immediately if no world
-		PollStatus();
+		Job->StatusPollTimerHandle.Reset();
+		Job->PollStatus();
+	});
+}
+
+void UAtlasJob::HandlePollError(const FAtlasError& PollError)
+{
+	const int32 StatusCode = PollError.HttpStatusCode;
+	const bool bTransient = StatusCode == 0 || StatusCode == 408 || StatusCode == 429
+		|| (StatusCode >= 500 && StatusCode <= 599);
+	if (bTransient && ++ConsecutivePollFailures <= 5 && !ExecutionId.IsEmpty())
+	{
+		const float BaseDelay = FMath::IsFinite(PollIntervalSeconds) ? FMath::Max(0.1f, PollIntervalSeconds) : 5.0f;
+		const float Delay = FMath::Min(30.0f, BaseDelay * FMath::Pow(2.0f, ConsecutivePollFailures - 1));
+		UE_LOG(LogTemp, Warning, TEXT("AtlasJob: Status check failed; retrying the same execution in %.1fs (%d/5)"), Delay, ConsecutivePollFailures);
+		SchedulePoll(Delay);
+		return;
 	}
+	FailWithError(PollError);
 }
 
 void UAtlasJob::PollStatus()
 {
+	if (!CheckExecutionCredentials()) return;
+	AtlasScheduling::Cancel(StatusPollTimerHandle);
+	if (StatusRequest) return; // Never overlap status requests.
 	if (bCancellationRequested || AtlasJobHelpers::IsTerminalState(State))
 	{
 		return;
 	}
 
-	if (!WorkflowAsset.IsValid())
+	if (!IsValid(GetExecutionWorkflow()))
 	{
 		FAtlasError PollError;
 		PollError.Code = EAtlasErrorCode::ValidationError;
@@ -753,10 +743,10 @@ void UAtlasJob::PollStatus()
 		return;
 	}
 
-	FString StatusUrl = WorkflowAsset->GetStatusUrl(ExecutionId);
+	FString StatusUrl = GetExecutionWorkflow()->GetStatusUrl(ExecutionId);
 
 	UE_LOG(LogTemp, Log, TEXT("AtlasJob[%s] polling status: %s"),
-		*JobId.ToString(EGuidFormats::DigitsWithHyphens), *StatusUrl);
+		*JobId.ToString(EGuidFormats::DigitsWithHyphens), TEXT("[details omitted]"));
 
 	// Create status request
 	StatusRequest = UAtlasHttpRequest::CreateRequest();
@@ -765,11 +755,19 @@ void UAtlasJob::PollStatus()
 	StatusRequest->SetVerb(EAtlasHttpVerb::GET);
 
 	FAtlasPlatformAuth::ApplyPlatformRequestSettings(StatusRequest);
+	StatusRequest->SetTimeout(ExecutionRequestTimeout);
 
 	// Bind callbacks
 	StatusRequest->OnRequestComplete.AddDynamic(this, &UAtlasJob::OnStatusPollComplete);
 	StatusRequest->OnRequestFailed.AddDynamic(this, &UAtlasJob::OnStatusPollFailed);
 
+#if WITH_DEV_AUTOMATION_TESTS
+	if (StatusRequestDispatcherForTests)
+	{
+		StatusRequestDispatcherForTests(StatusRequest);
+		return;
+	}
+#endif
 	StatusRequest->ProcessRequest();
 }
 
@@ -804,7 +802,7 @@ void UAtlasJob::OnStatusPollComplete(UAtlasHttpRequest* Request, UAtlasJsonObjec
 			ExecError.Code = EAtlasErrorCode::ExecutionFailed;
 		}
 
-		FailWithError(ExecError);
+		HandlePollError(ExecError);
 		return;
 	}
 
@@ -818,6 +816,7 @@ void UAtlasJob::OnStatusPollComplete(UAtlasHttpRequest* Request, UAtlasJsonObjec
 		return;
 	}
 
+	ConsecutivePollFailures = 0;
 	FString Status = ResponseJson->GetStringField(TEXT("status"));
 	UE_LOG(LogTemp, Log, TEXT("AtlasJob[%s] status: %s"),
 		*JobId.ToString(EGuidFormats::DigitsWithHyphens), *Status);
@@ -825,7 +824,11 @@ void UAtlasJob::OnStatusPollComplete(UAtlasHttpRequest* Request, UAtlasJsonObjec
 	if (Status == TEXT("completed"))
 	{
 		// Parse outputs from result
-		ParseStatusResponse(ResponseJson);
+		if (!ParseStatusResponse(ResponseJson))
+		{
+			FailWithError(FAtlasError(EAtlasErrorCode::ExecutionFailed, TEXT("Completed response is missing required outputs or contains invalid output types")));
+			return;
+		}
 
 		// Check if we need to download outputs
 		if (bAutoDownloadOutputs && FilesToDownload.Num() > 0)
@@ -871,29 +874,7 @@ void UAtlasJob::OnStatusPollComplete(UAtlasHttpRequest* Request, UAtlasJsonObjec
 	}
 	else if (Status == TEXT("pending") || Status == TEXT("running"))
 	{
-		// Schedule next poll
-		if (GWorld)
-		{
-			GWorld->GetTimerManager().SetTimer(
-				StatusPollTimerHandle,
-				FTimerDelegate::CreateUObject(this, &UAtlasJob::PollStatus),
-				PollIntervalSeconds,
-				false
-			);
-		}
-		else
-		{
-			// Fallback: use AsyncTask to schedule next poll
-			FTimerDelegate PollDelegate = FTimerDelegate::CreateUObject(this, &UAtlasJob::PollStatus);
-			AsyncTask(ENamedThreads::GameThread, [this]()
-			{
-				FPlatformProcess::Sleep(PollIntervalSeconds);
-				if (!bCancellationRequested && !AtlasJobHelpers::IsTerminalState(State))
-				{
-					PollStatus();
-				}
-			});
-		}
+		SchedulePoll(PollIntervalSeconds);
 	}
 	else
 	{
@@ -913,12 +894,12 @@ void UAtlasJob::OnStatusPollFailed(UAtlasHttpRequest* Request, const FString& Er
 		return;
 	}
 
-	UE_LOG(LogTemp, Error, TEXT("AtlasJob[%s] status poll failed: %s (status %d)"),
-		*JobId.ToString(EGuidFormats::DigitsWithHyphens), *ErrorMessage, StatusCode);
+	UE_LOG(LogTemp, Warning, TEXT("AtlasJob[%s] status poll failed: %s (status %d)"),
+		*JobId.ToString(EGuidFormats::DigitsWithHyphens), TEXT("[details omitted]"), StatusCode);
 
 	CleanupStatusRequest();
 
-	FAtlasError ExecError = FAtlasError::FromHttpStatus(StatusCode, FString());
+	FAtlasError ExecError = FAtlasError::FromHttpStatus(StatusCode, Request ? Request->GetResponseContent() : FString());
 	ExecError.HttpStatusCode = StatusCode;
 	ExecError.Timestamp = FDateTime::UtcNow();
 
@@ -928,11 +909,11 @@ void UAtlasJob::OnStatusPollFailed(UAtlasHttpRequest* Request, const FString& Er
 	}
 	else
 	{
-		ExecError.Code = EAtlasErrorCode::NetworkError;
-		ExecError.Message = ErrorMessage;
+		if (StatusCode == 0) ExecError.Code = EAtlasErrorCode::NetworkError;
+		if (ExecError.RawResponse.IsEmpty()) ExecError.Message = ErrorMessage;
 	}
 
-	FailWithError(ExecError);
+	HandlePollError(ExecError);
 }
 
 void UAtlasJob::CleanupStatusRequest()
@@ -941,123 +922,92 @@ void UAtlasJob::CleanupStatusRequest()
 	{
 		StatusRequest->OnRequestComplete.RemoveDynamic(this, &UAtlasJob::OnStatusPollComplete);
 		StatusRequest->OnRequestFailed.RemoveDynamic(this, &UAtlasJob::OnStatusPollFailed);
+		StatusRequest->CancelRequest();
 		StatusRequest->RemoveFromRoot();
 		StatusRequest = nullptr;
 	}
 
-	// Cancel any pending poll timer
-	if (GWorld)
-	{
-		GWorld->GetTimerManager().ClearTimer(StatusPollTimerHandle);
-	}
+	AtlasScheduling::Cancel(StatusPollTimerHandle);
 }
 
-void UAtlasJob::ParseStatusResponse(UAtlasJsonObject* ResponseJson)
+bool UAtlasJob::ParseStatusResponse(UAtlasJsonObject* ResponseJson)
 {
-	if (!ResponseJson)
+	if (!ResponseJson || !IsValid(GetExecutionWorkflow())) return false;
+	const TSharedPtr<FJsonObject>* Result = nullptr;
+	const TSharedPtr<FJsonObject>* JsonOutputs = nullptr;
+	if (!ResponseJson->GetJsonObject()->TryGetObjectField(TEXT("result"), Result) || !Result || !Result->IsValid()
+		|| !(*Result)->TryGetObjectField(TEXT("outputs"), JsonOutputs) || !JsonOutputs || !JsonOutputs->IsValid()) return false;
+	FAtlasWorkflowOutputs Parsed;
+	TMap<FString, FString> Downloads;
+	for (const FAtlasParameterDef& Def : GetExecutionWorkflow()->GetSchema().Outputs)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("AtlasJob[%s] status response has no JSON body"),
-			*JobId.ToString(EGuidFormats::DigitsWithHyphens));
-		return;
-	}
-
-	FilesToDownload.Empty();
-
-	// Get the output schema from the workflow
-	if (!WorkflowAsset.IsValid())
-	{
-		return;
-	}
-
-	// Status response has outputs nested in result.outputs
-	UAtlasJsonObject* ResultObj = ResponseJson->GetObjectField(TEXT("result"));
-	if (!ResultObj)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("AtlasJob[%s] status response missing 'result' field"),
-			*JobId.ToString(EGuidFormats::DigitsWithHyphens));
-		return;
-	}
-
-	UAtlasJsonObject* OutputsObj = ResultObj->GetObjectField(TEXT("outputs"));
-	if (!OutputsObj)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("AtlasJob[%s] status response missing 'result.outputs' field"),
-			*JobId.ToString(EGuidFormats::DigitsWithHyphens));
-		return;
-	}
-
-	const FAtlasWorkflowSchema& Schema = WorkflowAsset->GetSchema();
-
-	// Parse each output according to schema
-	for (const FAtlasParameterDef& OutputDef : Schema.Outputs)
-	{
-		const FString& OutputName = OutputDef.Name;
-		FAtlasValue OutputValue;
-		OutputValue.Type = OutputDef.Type;
-
-		switch (OutputDef.Type)
+		const TSharedPtr<FJsonValue>* Field = (*JsonOutputs)->Values.Find(Def.Name);
+		if (!Field || !Field->IsValid()) return false;
+		const auto& Json = *Field;
+		FAtlasValue Value;
+		Value.Type = Def.Type;
+		switch (Def.Type)
 		{
 		case EAtlasValueType::String:
-			OutputValue.StringValue = OutputsObj->GetStringField(OutputName);
+			if (!Json->TryGetString(Value.StringValue)) return false;
 			break;
-
 		case EAtlasValueType::Number:
-			OutputValue.NumberValue = OutputsObj->GetNumberField(OutputName);
-			break;
-
 		case EAtlasValueType::Integer:
-			OutputValue.IntValue = OutputsObj->GetIntegerField(OutputName);
+		{
+			double Number;
+			if (!Json->TryGetNumber(Number) || !FMath::IsFinite(Number)) return false;
+			if (Def.Type == EAtlasValueType::Integer)
+			{
+				if (Number < MIN_int32 || Number > MAX_int32 || FMath::FloorToDouble(Number) != Number) return false;
+				Value.IntValue = static_cast<int32>(Number);
+			}
+			else { Value.NumberValue = Number; if (!FMath::IsFinite(Value.NumberValue)) return false; }
 			break;
-
+		}
 		case EAtlasValueType::Boolean:
-			OutputValue.BoolValue = OutputsObj->GetBoolField(OutputName);
+			if (!Json->TryGetBool(Value.BoolValue)) return false;
 			break;
-
+		case EAtlasValueType::Json:
+			if (Json->Type != EJson::Object && Json->Type != EJson::Array) return false;
+			if (!FJsonSerializer::Serialize(Json, TEXT(""), TJsonWriterFactory<>::Create(&Value.JsonValue))) return false;
+			break;
 		case EAtlasValueType::Image:
 		case EAtlasValueType::Mesh:
 		case EAtlasValueType::Audio:
 		case EAtlasValueType::File:
 		case EAtlasValueType::FileId:
-			// Server returns FileId for file outputs
-			OutputValue.FileId = OutputsObj->GetStringField(OutputName);
-			if (!OutputValue.FileId.IsEmpty())
+			if (!Json->TryGetString(Value.FileId) || Value.FileId.IsEmpty()) return false;
 			{
-				FilesToDownload.Add(OutputName, OutputValue.FileId);
+				FString Extension = Def.Format.ToLower();
+				Extension.RemoveFromStart(TEXT("."));
+				bool bSafe = !Extension.IsEmpty() && Extension.Len() <= 12;
+				for (TCHAR Ch : Extension) bSafe &= FChar::IsAlnum(Ch);
+				Value.FileName = TEXT("Output_") + AtlasArchive::Component(Def.Name) + TEXT(".") + (bSafe ? Extension : TEXT("bin"));
 			}
+			Downloads.Add(Def.Name, Value.FileId);
 			break;
-
-		case EAtlasValueType::Json:
-			{
-				UAtlasJsonObject* NestedJson = OutputsObj->GetObjectField(OutputName);
-				if (NestedJson)
-				{
-					OutputValue.JsonValue = NestedJson->EncodeJson();
-				}
-			}
-			break;
-
-		default:
-			break;
+		default: return false;
 		}
-
-		Outputs.Values.Add(OutputName, OutputValue);
+		Parsed.Values.Add(Def.Name, MoveTemp(Value));
 	}
-
-	UE_LOG(LogTemp, Log, TEXT("AtlasJob[%s] parsed %d outputs, %d files to download"),
-		*JobId.ToString(EGuidFormats::DigitsWithHyphens), Outputs.Values.Num(), FilesToDownload.Num());
+	Outputs = MoveTemp(Parsed);
+	FilesToDownload = MoveTemp(Downloads);
+	return true;
 }
 
 // ==================== Pipeline: Download Phase ====================
 
 void UAtlasJob::StartDownloadPhase()
 {
+	if (!CheckExecutionCredentials()) return;
 	if (bCancellationRequested) return;
 
 	SetPhase(EAtlasJobPhase::Downloading);
+	if (bCancellationRequested || IsFinished()) return;
 	DownloadsCompleted = 0;
 	DownloadFailures = 0;
 	DownloadOperations.Empty();
-	DownloadedFiles.Empty();
+
 
 	UE_LOG(LogTemp, Log, TEXT("AtlasJob[%s] starting download phase with %d files"),
 		*JobId.ToString(EGuidFormats::DigitsWithHyphens), FilesToDownload.Num());
@@ -1066,25 +1016,20 @@ void UAtlasJob::StartDownloadPhase()
 	FileManager->OnDownloadComplete.AddDynamic(this, &UAtlasJob::HandleDownloadComplete);
 	FileManager->OnDownloadFailed.AddDynamic(this, &UAtlasJob::HandleDownloadFailed);
 
-	// Start all downloads in parallel
-	for (const auto& Pair : FilesToDownload)
 	{
-		const FString& OutputName = Pair.Key;
-		const FString& FileId = Pair.Value;
-
-		FGuid OperationId = FileManager->DownloadFile(WorkflowAsset.Get(), FileId);
-
-		if (OperationId.IsValid())
+		TGuardValue<bool> StartingDownloads(bStartingDownloads, true);
+		for (const auto& Pair : FilesToDownload)
 		{
+			if (bCancellationRequested || IsFinished()) return;
+			const FString OutputName = Pair.Key;
+			const FGuid OperationId = FGuid::NewGuid();
+			// Record ownership before any synchronous failure/completion can call back.
 			DownloadOperations.Add(OperationId, OutputName);
-		}
-		else
-		{
-			UE_LOG(LogTemp, Error, TEXT("AtlasJob[%s] failed to start download for '%s' (FileId=%s)"),
-				*JobId.ToString(EGuidFormats::DigitsWithHyphens), *OutputName, *FileId);
-			
-			DownloadsCompleted++;
-			DownloadFailures++;
+			const FGuid Started = FileManager->DownloadFileWithOperationId(GetExecutionWorkflow(), Pair.Value, OperationId);
+			if (!Started.IsValid() && DownloadOperations.Contains(OperationId))
+			{
+				OnFileDownloadFailed(OperationId, TEXT("Download could not start"), 0, OutputName);
+			}
 		}
 	}
 
@@ -1094,16 +1039,28 @@ void UAtlasJob::StartDownloadPhase()
 
 void UAtlasJob::OnFileDownloadComplete(const FGuid& OperationId, const FString& FileId, const TArray<uint8>& FileData, const FString& OutputName)
 {
+	if (bFinishing || bCancellationRequested || IsFinished()) return;
 	UE_LOG(LogTemp, Log, TEXT("AtlasJob[%s] download complete for '%s': %d bytes"),
 		*JobId.ToString(EGuidFormats::DigitsWithHyphens), *OutputName, FileData.Num());
 
 	// Store the downloaded data
-	DownloadedFiles.Add(OutputName, FileData);
+
 
 	// Update the output value with the file data
 	if (FAtlasValue* OutputValue = Outputs.Values.Find(OutputName))
 	{
 		OutputValue->FileData = FileData;
+		FString Extension = FileManager->GetDownloadExtension(OperationId);
+		// Recognizable bytes take precedence over MIME/schema labels.
+		if (FileData.Num() >= 12)
+		{
+			if (FileData[0] == 0x89 && FileData[1] == 'P' && FileData[2] == 'N' && FileData[3] == 'G') Extension = TEXT("png");
+			else if (FileData[0] == 0xFF && FileData[1] == 0xD8 && FileData[2] == 0xFF) Extension = TEXT("jpg");
+			else if (FMemory::Memcmp(FileData.GetData(), "RIFF", 4) == 0 && FMemory::Memcmp(FileData.GetData() + 8, "WAVE", 4) == 0) Extension = TEXT("wav");
+			else if (FMemory::Memcmp(FileData.GetData(), "OggS", 4) == 0) Extension = TEXT("ogg");
+			else if (FMemory::Memcmp(FileData.GetData(), "glTF", 4) == 0) Extension = TEXT("glb");
+		}
+		if (!Extension.IsEmpty()) OutputValue->FileName = TEXT("Output_") + AtlasArchive::Component(OutputName) + TEXT(".") + Extension;
 	}
 
 	DownloadOperations.Remove(OperationId);
@@ -1115,9 +1072,11 @@ void UAtlasJob::OnFileDownloadComplete(const FGuid& OperationId, const FString& 
 
 void UAtlasJob::OnFileDownloadFailed(const FGuid& OperationId, const FString& ErrorMessage, int32 StatusCode, const FString& OutputName)
 {
+	if (bFinishing || bCancellationRequested || IsFinished()) return;
 	UE_LOG(LogTemp, Warning, TEXT("AtlasJob[%s] download failed for '%s': %s (status %d)"),
-		*JobId.ToString(EGuidFormats::DigitsWithHyphens), *OutputName, *ErrorMessage, StatusCode);
+		*JobId.ToString(EGuidFormats::DigitsWithHyphens), *OutputName, TEXT("[details omitted]"), StatusCode);
 
+	OutputWarnings.Add(FString::Printf(TEXT("Download %s: %s"), *OutputName, *ErrorMessage));
 	// Don't fail the whole job for download failures - outputs still have FileIds
 	DownloadOperations.Remove(OperationId);
 	DownloadsCompleted++;
@@ -1129,7 +1088,7 @@ void UAtlasJob::OnFileDownloadFailed(const FGuid& OperationId, const FString& Er
 
 void UAtlasJob::CheckDownloadPhaseComplete()
 {
-	if (bCancellationRequested || AtlasJobHelpers::IsTerminalState(State))
+	if (bStartingDownloads || bFinishing || bCancellationRequested || AtlasJobHelpers::IsTerminalState(State))
 	{
 		return;
 	}
@@ -1157,10 +1116,46 @@ void UAtlasJob::CheckDownloadPhaseComplete()
 
 void UAtlasJob::FinalizeCompletion()
 {
-	UE_LOG(LogTemp, Log, TEXT("AtlasJob[%s] finalizing completion"),
-		*JobId.ToString(EGuidFormats::DigitsWithHyphens));
-
-	CompleteWithOutputs(Outputs);
+	if (bSavingOutputs || bCancellationRequested || IsFinished()) return;
+	bOutputsArchiveAttempted = true;
+	if (!UAtlasSDKSettings::Get()->bAutoSaveOutputFiles) { CompleteWithOutputs(Outputs); return; }
+	struct FOutputWrite { FString Name, Path; TArray<uint8> Bytes; bool bSaved = false; };
+	TArray<FOutputWrite> Writes;
+	UAtlasOutputManager* OutputManager = NewObject<UAtlasOutputManager>(this);
+	const FAtlasJobFolderInfo Folder = OutputManager->GetJobFolderInfo(this);
+	const FString Root = UAtlasSDKSettings::Get()->GetOutputFolderPath();
+	for (auto& Pair : Outputs.Values)
+	{
+		if ((!Pair.Value.IsFileType() && !Pair.Value.IsFileId()) || Pair.Value.FileData.IsEmpty()) continue;
+		FString Extension = FPaths::GetExtension(Pair.Value.FileName).ToLower();
+		if (Extension.IsEmpty() || Extension.Len() > 12 || !Extension.GetCharArray().FilterByPredicate([](TCHAR Ch) { return Ch && !FChar::IsAlnum(Ch); }).IsEmpty()) Extension = TEXT("bin");
+		const FString Path = Folder.OutputsDiskPath / (TEXT("Output_") + AtlasArchive::Component(Pair.Key) + TEXT(".") + Extension);
+		if (!Folder.IsValid() || !AtlasArchive::IsContained(Root, Path)) { OutputWarnings.Add(TEXT("Unsafe output archive path")); continue; }
+		Writes.Add({ Pair.Key, Path, MoveTemp(Pair.Value.FileData), false });
+	}
+	if (Writes.IsEmpty()) { CompleteWithOutputs(Outputs); return; }
+	bSavingOutputs = true;
+	TWeakObjectPtr<UAtlasJob> WeakJob(this);
+	AtlasFileWork::Enqueue([WeakJob, Writes = MoveTemp(Writes)]() mutable
+	{
+		for (auto& Write : Writes) Write.bSaved = AtlasArchive::WriteBytes(Write.Path, Write.Bytes.GetData(), Write.Bytes.Num());
+		AsyncTask(ENamedThreads::GameThread, [WeakJob, Writes = MoveTemp(Writes)]() mutable
+		{
+			TStrongObjectPtr<UAtlasJob> Job(WeakJob.Get());
+			if (!Job.IsValid()) return;
+			Job->bSavingOutputs = false;
+			for (auto& Write : Writes)
+			{
+				if (auto* Value = Job->Outputs.Values.Find(Write.Name))
+				{
+					Value->FileData = MoveTemp(Write.Bytes);
+					if (Write.bSaved) { Value->FilePath = Write.Path; Value->FileName = FPaths::GetCleanFilename(Write.Path); }
+					else Job->OutputWarnings.Add(FString::Printf(TEXT("Could not archive output '%s'; bytes remain available"), *Write.Name));
+				}
+			}
+			if (!Job->bCancellationRequested && !Job->IsFinished()) Job->CompleteWithOutputs(Job->Outputs);
+		});
+	});
 }
 
 void UAtlasJob::UpdateOverallProgress()
@@ -1316,20 +1311,21 @@ void UAtlasJob::SetProgress(float NewProgress)
 
 void UAtlasJob::CompleteWithOutputs(const FAtlasWorkflowOutputs& InOutputs)
 {
-	if (AtlasJobHelpers::IsTerminalState(State))
+	if (bFinishing || AtlasJobHelpers::IsTerminalState(State))
 	{
 		UE_LOG(LogTemp, Warning, TEXT("AtlasJob::CompleteWithOutputs() called on already-finished job"));
 		return;
 	}
+	TStrongObjectPtr<UAtlasJob> KeepAlive(this);
+	TGuardValue<bool> Finishing(bFinishing, true);
+
 
 	// Clear execution timeout timer
-	if (GWorld)
-	{
-		GWorld->GetTimerManager().ClearTimer(ExecutionTimeoutHandle);
-	}
+	AtlasScheduling::Cancel(ExecutionTimeoutHandle);
 
 	Outputs = InOutputs;
-	CompletedAt = FDateTime::Now();  // Use local time for display consistency
+	FinishedMonotonic = FPlatformTime::Seconds();
+	CompletedAt = FDateTime::UtcNow();  // UTC for newly written records
 	
 	SetPhase(EAtlasJobPhase::Done);
 	SetProgress(1.0f);
@@ -1343,24 +1339,31 @@ void UAtlasJob::CompleteWithOutputs(const FAtlasWorkflowOutputs& InOutputs)
 
 void UAtlasJob::FailWithError(const FAtlasError& InError)
 {
-	if (AtlasJobHelpers::IsTerminalState(State))
+	if (bFinishing || AtlasJobHelpers::IsTerminalState(State))
 	{
 		UE_LOG(LogTemp, Warning, TEXT("AtlasJob::FailWithError() called on already-finished job"));
 		return;
 	}
+	TStrongObjectPtr<UAtlasJob> KeepAlive(this);
+	TGuardValue<bool> Finishing(bFinishing, true);
+
 
 	Error = InError;
-	CompletedAt = FDateTime::Now();  // Use local time for display consistency
+	if (bExecuteRequestSent && Error.IsRetryable())
+	{
+		Error.Message += ExecutionId.IsEmpty()
+			? TEXT(" Submission outcome is uncertain; automatic resubmission is disabled to avoid duplicate execution.")
+			: TEXT(" Remote execution may still be running; automatic resubmission is disabled.");
+	}
+	FinishedMonotonic = FPlatformTime::Seconds();
+	CompletedAt = FDateTime::UtcNow();  // UTC for newly written records
 
 	// Cleanup any pending resources
 	CleanupExecuteRequest();
 	CleanupStatusRequest();
 
 	// Clear execution timeout timer
-	if (GWorld)
-	{
-		GWorld->GetTimerManager().ClearTimer(ExecutionTimeoutHandle);
-	}
+	AtlasScheduling::Cancel(ExecutionTimeoutHandle);
 	
 	if (FileManager)
 	{
@@ -1370,6 +1373,18 @@ void UAtlasJob::FailWithError(const FAtlasError& InError)
 		FileManager->OnDownloadFailed.RemoveDynamic(this, &UAtlasJob::HandleDownloadFailed);
 	}
 
+	// Detach this job before cancellation events are broadcast by the shared file manager.
+	TArray<FGuid> UploadIds, DownloadIds;
+	UploadOperations.GetKeys(UploadIds);
+	DownloadOperations.GetKeys(DownloadIds);
+	UploadOperations.Empty();
+	DownloadOperations.Empty();
+	if (FileManager)
+	{
+		for (const FGuid& Id : UploadIds) FileManager->CancelUpload(Id);
+		for (const FGuid& Id : DownloadIds) FileManager->CancelDownload(Id);
+	}
+
 	// Determine final state based on whether this was a cancellation
 	EAtlasJobState FinalState = bCancellationRequested ? EAtlasJobState::Cancelled : EAtlasJobState::Failed;
 
@@ -1377,7 +1392,7 @@ void UAtlasJob::FailWithError(const FAtlasError& InError)
 	SetState(FinalState);
 
 	UE_LOG(LogTemp, Log, TEXT("AtlasJob[%s] failed: %s"),
-		*JobId.ToString(EGuidFormats::DigitsWithHyphens), *Error.GetSummary());
+		*JobId.ToString(EGuidFormats::DigitsWithHyphens), TEXT("[details available on job]"));
 
 	OnFailed.Broadcast(this, Error);
 }
@@ -1386,12 +1401,13 @@ void UAtlasJob::FailWithError(const FAtlasError& InError)
 
 float UAtlasJob::GetDurationSeconds() const
 {
+	if (StartedMonotonic >= 0.0) return FMath::Max(0.0, (FinishedMonotonic >= 0.0 ? FinishedMonotonic : FPlatformTime::Seconds()) - StartedMonotonic);
 	if (!StartedAt.GetTicks())
 	{
 		return 0.0f; // Not started
 	}
 
-	FDateTime EndTime = CompletedAt.GetTicks() ? CompletedAt : FDateTime::Now();
+	FDateTime EndTime = CompletedAt.GetTicks() ? CompletedAt : FDateTime::UtcNow();
 	return (EndTime - StartedAt).GetTotalSeconds();
 }
 
@@ -1421,4 +1437,13 @@ FString UAtlasJob::GetStatusString() const
 	default:
 		return TEXT("Unknown");
 	}
+}
+
+bool UAtlasJob::CheckExecutionCredentials()
+{
+	if (ExecutionCredentialScope.IsEmpty()) return true; // Manually constructed/test jobs have no execution snapshot.
+	FTCHARToUTF8 Key(*FAtlasPlatformAuth::GetResolvedApiKey());
+	if (ExecutionCredentialScope == FMD5::HashBytes(reinterpret_cast<const uint8*>(Key.Get()), Key.Length())) return true;
+	FailWithError(FAtlasError(EAtlasErrorCode::Unauthorized, TEXT("Workspace credentials changed during this run; start a new job in the selected workspace")));
+	return false;
 }

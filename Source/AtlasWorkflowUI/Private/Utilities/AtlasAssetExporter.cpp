@@ -1,6 +1,9 @@
 // Copyright Atlas Platform. All Rights Reserved.
 
 #include "Utilities/AtlasAssetExporter.h"
+#include "AssetExportTask.h"
+#include "Exporters/Exporter.h"
+#include "UObject/StrongObjectPtr.h"
 #include "Engine/Texture2D.h"
 #include "Engine/StaticMesh.h"
 #include "EditorFramework/AssetImportData.h"
@@ -9,6 +12,8 @@
 #include "HAL/PlatformFileManager.h"
 #include "HAL/FileManager.h"
 #include "ImageUtils.h"
+#include "ImageCore.h"
+#include "Misc/ScopeExit.h"
 
 FAtlasExportResult UAtlasAssetExporter::GetValidFilePath(UObject* Asset)
 {
@@ -68,39 +73,59 @@ FAtlasExportResult UAtlasAssetExporter::ExportTextureToPNG(UTexture2D* Texture, 
 		Result.bIsTempExport = true;
 	}
 
-	// Get texture data
-	FTexturePlatformData* PlatformData = Texture->GetPlatformData();
-	if (!PlatformData || PlatformData->Mips.Num() == 0)
+	// Use the same source-art conversion as AtlasWorkflowEditorUtilities. Source art
+	// remains in the asset even when the original imported file is missing on disk.
+	FImage Image;
+	if (!FImageUtils::GetTexture2DSourceImage(Texture, Image))
 	{
-		Result.ErrorMessage = TEXT("Texture has no platform data");
-		return Result;
+		FTexturePlatformData* PlatformData = Texture->GetPlatformData();
+		if (!PlatformData || PlatformData->Mips.Num() == 0)
+		{
+			Result.ErrorMessage = TEXT("Texture has no source image or readable platform mip");
+			return Result;
+		}
+		ERawImageFormat::Type Format;
+		int32 BytesPerPixel;
+		switch (PlatformData->PixelFormat)
+		{
+		case PF_B8G8R8A8: Format = ERawImageFormat::BGRA8; BytesPerPixel = 4; break;
+		case PF_G8: Format = ERawImageFormat::G8; BytesPerPixel = 1; break;
+		case PF_FloatRGBA: Format = ERawImageFormat::RGBA16F; BytesPerPixel = 8; break;
+		default:
+			Result.ErrorMessage = TEXT("Texture has no source image; its platform format cannot be exported safely. Reimport source art or use a supported uncompressed texture.");
+			return Result;
+		}
+		FTexture2DMipMap& Mip = PlatformData->Mips[0];
+		const int64 PixelCount = static_cast<int64>(Mip.SizeX) * Mip.SizeY;
+		if (Mip.SizeX <= 0 || Mip.SizeY <= 0 || Mip.SizeZ != 1
+			|| PixelCount > MAX_int32 / BytesPerPixel
+			|| Mip.BulkData.GetBulkDataSize() != PixelCount * BytesPerPixel)
+		{
+			Result.ErrorMessage = TEXT("Texture mip dimensions or byte count are invalid for export");
+			return Result;
+		}
+		FByteBulkData& BulkData = Mip.BulkData;
+		if (BulkData.IsLocked())
+		{
+			Result.ErrorMessage = TEXT("Texture mip is already locked; try exporting again later");
+			return Result;
+		}
+		const void* Data = BulkData.LockReadOnly();
+		ON_SCOPE_EXIT { BulkData.Unlock(); };
+		if (!Data)
+		{
+			Result.ErrorMessage = TEXT("Texture mip data is unavailable for CPU export");
+			return Result;
+		}
+		const EGammaSpace Gamma = Format == ERawImageFormat::RGBA16F
+			? EGammaSpace::Linear : (Texture->SRGB ? EGammaSpace::sRGB : EGammaSpace::Linear);
+		Image.Init(Mip.SizeX, Mip.SizeY, Format, Gamma);
+		FMemory::Memcpy(Image.RawData.GetData(), Data, PixelCount * BytesPerPixel);
 	}
 
-	// Lock the mip for reading
-	FByteBulkData& BulkData = PlatformData->Mips[0].BulkData;
-	const void* Data = BulkData.LockReadOnly();
-	if (!Data)
-	{
-		Result.ErrorMessage = TEXT("Failed to lock texture data");
-		return Result;
-	}
-
-	int32 Width = PlatformData->Mips[0].SizeX;
-	int32 Height = PlatformData->Mips[0].SizeY;
-
-	// Create image from raw data
-	TArray<FColor> Pixels;
-	Pixels.SetNum(Width * Height);
-
-	// Copy pixel data (assuming BGRA8 format)
-	FMemory::Memcpy(Pixels.GetData(), Data, Width * Height * 4);
-	BulkData.Unlock();
-
-	// Export to PNG using FImageUtils
-	TArray<uint8> PNGData;
-	FImageUtils::ThumbnailCompressImageArray(Width, Height, Pixels, PNGData);
-
-	if (PNGData.Num() == 0)
+	// Always encode PNG, regardless of the supplied filename extension.
+	TArray64<uint8> PNGData;
+	if (!FImageUtils::CompressImage(PNGData, TEXT("png"), Image) || PNGData.IsEmpty())
 	{
 		Result.ErrorMessage = TEXT("Failed to compress image to PNG");
 		return Result;
@@ -142,10 +167,18 @@ FAtlasExportResult UAtlasAssetExporter::ExportMeshToFBX(UStaticMesh* Mesh, const
 		Result.bIsTempExport = true;
 	}
 
-	// For mesh export, we'll use the Unreal exporter system
-	// This is more complex and requires the FBX SDK
-	// For now, return error indicating this needs implementation
-	Result.ErrorMessage = TEXT("Mesh export not yet implemented - please use the original source file");
+	TStrongObjectPtr<UAssetExportTask> Task(NewObject<UAssetExportTask>());
+	Task->Object = Mesh;
+	Task->Filename = FinalPath;
+	Task->bAutomated = true;
+	Task->bPrompt = false;
+	Task->bReplaceIdentical = true;
+	Task->bSelected = false;
+	Task->bWriteEmptyFiles = false;
+	Result.bSuccess = UExporter::RunAssetExportTask(Task.Get()) && FPaths::FileExists(FinalPath);
+	if (Result.bSuccess) Result.FilePath = FinalPath;
+	else Result.ErrorMessage = Task->Errors.IsEmpty() ? TEXT("No FBX exporter is available or export failed") : FString::Join(Task->Errors, TEXT("; "));
+
 	return Result;
 }
 

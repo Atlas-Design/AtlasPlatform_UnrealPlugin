@@ -5,6 +5,7 @@
 #include "AtlasMultipartForm.h"
 #include "AtlasHTTP.h"
 #include "HttpModule.h"
+#include "UObject/StrongObjectPtr.h"
 
 UAtlasHttpRequest::UAtlasHttpRequest()
 	: RequestStatus(EAtlasRequestStatus::NotStarted)
@@ -113,6 +114,12 @@ void UAtlasHttpRequest::SetTimeout(float InTimeoutSeconds)
 
 void UAtlasHttpRequest::ProcessRequest()
 {
+	if (!PreflightError.IsEmpty())
+	{
+		RequestStatus = EAtlasRequestStatus::Failed;
+		OnRequestFailed.Broadcast(this, PreflightError, 403);
+		return;
+	}
 	if (RequestStatus == EAtlasRequestStatus::Processing)
 	{
 		UE_LOG(LogAtlasHTTP, Warning, TEXT("Request is already in progress"));
@@ -141,8 +148,9 @@ void UAtlasHttpRequest::ProcessRequest()
 	if (RequestBytes.Num() > 0)
 	{
 		HttpRequest->SetHeader(TEXT("Content-Type"), BinaryContentType);
-		HttpRequest->SetContent(RequestBytes);
-		UE_LOG(LogAtlasHTTP, Log, TEXT("Setting binary request content (%d bytes, Content-Type: %s)"), RequestBytes.Num(), *BinaryContentType);
+		const int32 ByteCount = RequestBytes.Num();
+		HttpRequest->SetContent(MoveTemp(RequestBytes));
+		UE_LOG(LogAtlasHTTP, Log, TEXT("Setting binary request content (%d bytes, Content-Type: %s)"), ByteCount, *BinaryContentType);
 	}
 
 	if (TimeoutSeconds > 0.0f)
@@ -150,13 +158,19 @@ void UAtlasHttpRequest::ProcessRequest()
 		HttpRequest->SetTimeout(TimeoutSeconds);
 	}
 
+	HttpRequest->SetDelegateThreadPolicy(EHttpRequestDelegateThreadPolicy::CompleteOnGameThread);
+	HttpRequest->OnRequestProgress64().BindWeakLambda(this, [this](FHttpRequestPtr, uint64 Sent, uint64 Received)
+	{
+		TStrongObjectPtr<UAtlasHttpRequest> KeepAlive(this);
+		OnTransferProgress.Broadcast(this, int64(Sent), int64(Received));
+	});
 	// Bind completion delegate
 	HttpRequest->OnProcessRequestComplete().BindUObject(this, &UAtlasHttpRequest::OnHttpRequestComplete);
 
 	// Update status and send
 	RequestStatus = EAtlasRequestStatus::Processing;
 	
-	UE_LOG(LogAtlasHTTP, Log, TEXT("Processing %s request to: %s"), *RequestVerb, *RequestURL);
+	UE_LOG(LogAtlasHTTP, Log, TEXT("Processing %s request"), *RequestVerb);
 	
 	if (!HttpRequest->ProcessRequest())
 	{
@@ -198,7 +212,7 @@ const TArray<uint8>& UAtlasHttpRequest::GetResponseContentBinary() const
 {
 	if (CachedResponse.IsValid())
 	{
-		CachedResponseBytes = CachedResponse->GetContent();
+		return CachedResponse->GetContent();
 	}
 	return CachedResponseBytes;
 }
@@ -251,6 +265,7 @@ TMap<FString, FString> UAtlasHttpRequest::GetAllResponseHeaders() const
 
 void UAtlasHttpRequest::OnHttpRequestComplete(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bWasSuccessful)
 {
+	TStrongObjectPtr<UAtlasHttpRequest> KeepAlive(this);
 	CachedResponse = Response;
 
 	if (bWasSuccessful && Response.IsValid())
@@ -263,14 +278,20 @@ void UAtlasHttpRequest::OnHttpRequestComplete(FHttpRequestPtr Request, FHttpResp
 			RequestStatus = EAtlasRequestStatus::Succeeded;
 			UE_LOG(LogAtlasHTTP, Log, TEXT("Request succeeded with code %d"), ResponseCode);
 			
-			UAtlasJsonObject* ResponseJson = GetResponseJson();
+			UAtlasJsonObject* ResponseJson = bBinaryResponse ? nullptr : GetResponseJson();
 			OnRequestComplete.Broadcast(this, ResponseJson, ResponseCode);
 		}
 		else
 		{
 			RequestStatus = EAtlasRequestStatus::Failed;
 			FString ErrorMsg = FString::Printf(TEXT("HTTP Error: %d"), ResponseCode);
-			UE_LOG(LogAtlasHTTP, Warning, TEXT("%s"), *ErrorMsg);
+			if (UAtlasJsonObject* Details = GetResponseJson())
+			{
+				FString Message = Details->GetStringField(TEXT("message"));
+				if (Message.IsEmpty()) Message = Details->GetStringField(TEXT("error"));
+				if (!Message.IsEmpty()) ErrorMsg = Message;
+			}
+			UE_LOG(LogAtlasHTTP, Warning, TEXT("HTTP failure %d (details available on the request)"), ResponseCode);
 			
 			OnRequestFailed.Broadcast(this, ErrorMsg, ResponseCode);
 		}
@@ -285,7 +306,7 @@ void UAtlasHttpRequest::OnHttpRequestComplete(FHttpRequestPtr Request, FHttpResp
 			ErrorMsg = FString::Printf(TEXT("Request failed with code %d"), Response->GetResponseCode());
 		}
 		
-		UE_LOG(LogAtlasHTTP, Error, TEXT("%s"), *ErrorMsg);
+		UE_LOG(LogAtlasHTTP, Error, TEXT("HTTP transport failure"));
 		OnRequestFailed.Broadcast(this, ErrorMsg, Response.IsValid() ? Response->GetResponseCode() : 0);
 	}
 }

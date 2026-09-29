@@ -16,6 +16,7 @@ namespace FAtlasPlatformAuth
 
 	/** True when a non-empty API key is available from settings and/or environment. */
 	ATLASSDK_API bool HasConfiguredApiKey();
+	ATLASSDK_API bool IsTrustedDestination(const FString& Url);
 
 	/** Workspace API key from project settings, else ATLAS_API_KEY when configured to read env. */
 	ATLASSDK_API FString GetResolvedApiKey();

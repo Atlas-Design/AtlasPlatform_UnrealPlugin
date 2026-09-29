@@ -10,6 +10,13 @@ FAtlasBatchValidationResult UAtlasBatchValidator::ValidateBatch(
 	FAtlasBatchValidationResult Result;
 	Result.bAllValid = true;
 
+	if (Batch.MaxConcurrentJobs < 1 || Batch.MaxRetriesPerRow < 0)
+	{
+		Result.bAllValid = false;
+		Result.BatchErrors.Add(TEXT("MaxConcurrentJobs must be at least 1 and MaxRetriesPerRow must be non-negative"));
+		return Result;
+	}
+
 	if (!Schema.IsValid())
 	{
 		Result.bAllValid = false;

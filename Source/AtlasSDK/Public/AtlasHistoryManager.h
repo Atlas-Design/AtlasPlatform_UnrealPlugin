@@ -24,6 +24,7 @@ class ATLASSDK_API UAtlasHistoryManager : public UObject
 
 public:
 	UAtlasHistoryManager();
+	virtual void BeginDestroy() override;
 
 	// ==================== Save Operations ====================
 
@@ -122,6 +123,10 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Atlas|History")
 	void ClearHistory(const FString& ApiId = TEXT(""));
+
+	/** Invalidate cached metadata after external archive edits. The next query reloads it. */
+	UFUNCTION(BlueprintCallable, Category = "Atlas|History")
+	void RefreshHistory();
 
 	/**
 	 * Delete a specific record from history.
@@ -238,6 +243,22 @@ protected:
 	bool JsonToOutputs(const TSharedPtr<FJsonObject>& JsonObj, FAtlasWorkflowOutputs& OutOutputs);
 
 private:
+	void EnsureHistoryIndex();
+	TArray<FAtlasJobHistoryRecord> IndexedRecords;
+	TArray<FString> IndexedWorkflowIds;
+	TArray<FAtlasWorkflowInfo> IndexedWorkflowInfo;
+	FString IndexedOutputRoot;
+	uint64 IndexedRevision = MAX_uint64;
+#if WITH_EDITOR
+	void UpdateDirectoryWatches(const FString& OutputRoot);
+	void ClearDirectoryWatches();
+	TMap<FString, FDelegateHandle> DirectoryWatchHandles;
+#endif
+#if WITH_DEV_AUTOMATION_TESTS
+	friend struct FAtlasNonBatchTestAccess;
+	friend struct FAtlasHistoryIndexTestAccess;
+	FString TestHistoryDirectory;
+#endif
 	/** Cache of loaded history (ApiId -> Records) */
 	TMap<FString, TArray<FAtlasJobHistoryRecord>> HistoryCache;
 

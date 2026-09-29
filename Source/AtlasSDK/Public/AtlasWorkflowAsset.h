@@ -10,6 +10,19 @@
 
 class UAtlasJob;
 class UAtlasJobManager;
+class UAtlasWorkflowAsset;
+
+USTRUCT(BlueprintType)
+struct ATLASSDK_API FAtlasWorkflowCatalogEntry
+{
+	GENERATED_BODY()
+	UPROPERTY(BlueprintReadOnly, Category = "Atlas|Workflow")
+	TSoftObjectPtr<UAtlasWorkflowAsset> Asset;
+	UPROPERTY(BlueprintReadOnly, Category = "Atlas|Workflow")
+	FString DisplayName;
+	UPROPERTY(BlueprintReadOnly, Category = "Atlas|Workflow")
+	FString ApiId;
+};
 
 /**
  * Data Asset for storing Atlas workflow configuration.
@@ -32,6 +45,16 @@ class ATLASSDK_API UAtlasWorkflowAsset : public UDataAsset
 public:
 	UAtlasWorkflowAsset();
 
+	/** Enumerate metadata without loading workflow packages. Old unsaved assets may have an empty ApiId. */
+	UFUNCTION(BlueprintCallable, Category = "Atlas|Workflow")
+	static TArray<FAtlasWorkflowCatalogEntry> GetWorkflowCatalog();
+	/** Loads only a match when registry tags exist; legacy assets are inspected as a compatibility fallback. */
+	UFUNCTION(BlueprintCallable, Category = "Atlas|Workflow")
+	static UAtlasWorkflowAsset* FindWorkflowByApiId(const FString& ApiId);
+#if WITH_EDITOR
+	virtual void GetAssetRegistryTags(FAssetRegistryTagsContext Context) const override;
+#endif
+
 	// ==================== Configuration ====================
 
 	/**
@@ -40,6 +63,9 @@ public:
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Atlas|Configuration", meta = (MultiLine = true))
 	FString JsonConfig;
+	/** Transient UI catalog handle; never persisted or used as an execution schema. */
+	UPROPERTY(Transient)
+	TSoftObjectPtr<UAtlasWorkflowAsset> CatalogSource;
 
 	/**
 	 * Parsed workflow schema containing API ID, inputs, and outputs.

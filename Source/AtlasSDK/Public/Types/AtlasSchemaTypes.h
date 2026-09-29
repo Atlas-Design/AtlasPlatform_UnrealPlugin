@@ -5,6 +5,8 @@
 #include "CoreMinimal.h"
 #include "Types/AtlasValueTypes.h"
 #include "Types/AtlasWorkflowTypes.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
 #include "AtlasSchemaTypes.generated.h"
 
 /**
@@ -48,6 +50,10 @@ struct ATLASSDK_API FAtlasParameterDef
 	/** Whether min/max constraints are enabled */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Atlas|Schema")
 	bool bHasRange = false;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Atlas|Schema")
+	bool bHasMinimum = false;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Atlas|Schema")
+	bool bHasMaximum = false;
 
 	/** Available options for enum/dropdown types */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Atlas|Schema")
@@ -163,31 +169,33 @@ struct ATLASSDK_API FAtlasParameterDef
 			return false;
 		}
 
-		// Range validation for numeric types
-		if (bHasRange)
+		if (Type == EAtlasValueType::Number || Type == EAtlasValueType::Integer)
 		{
-			if (Type == EAtlasValueType::Number)
+			const double Number = Type == EAtlasValueType::Number ? Value.NumberValue : Value.IntValue;
+			const bool bLegacyRange = bHasRange && !bHasMinimum && !bHasMaximum;
+			if (!FMath::IsFinite(Number) || ((bHasMinimum || bLegacyRange) && Number < MinValue)
+				|| ((bHasMaximum || bLegacyRange) && Number > MaxValue))
 			{
-				float NumValue = Value.GetNumber();
-				if (NumValue < MinValue || NumValue > MaxValue)
-				{
-					OutError = FString::Printf(TEXT("Input '%s' value %.2f is outside range [%.2f, %.2f]"),
-						*GetDisplayName(), NumValue, MinValue, MaxValue);
-					return false;
-				}
+				OutError = FString::Printf(TEXT("Input '%s' is not finite or is outside its declared bounds"), *Name);
+				return false;
 			}
-			else if (Type == EAtlasValueType::Integer)
+		}
+		if (IsFileType() || Type == EAtlasValueType::FileId)
+		{
+			if (Value.FileId.IsEmpty() && Value.FileData.IsEmpty() && (Value.FilePath.IsEmpty() || !FPaths::FileExists(Value.FilePath)))
 			{
-				int32 IntValue = Value.GetInteger();
-				if (IntValue < (int32)MinValue || IntValue > (int32)MaxValue)
-				{
-					OutError = FString::Printf(TEXT("Input '%s' value %d is outside range [%d, %d]"),
-						*GetDisplayName(), IntValue, (int32)MinValue, (int32)MaxValue);
-					return false;
-				}
+				OutError = FString::Printf(TEXT("Input '%s' requires a file ID, readable file or inline bytes"), *Name);
+				return false;
 			}
 		}
 
+		if (Type == EAtlasValueType::Json)
+		{
+			TSharedPtr<FJsonValue> Json;
+			if (!FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Value.JsonValue), Json) || !Json.IsValid()
+				|| (Json->Type != EJson::Object && Json->Type != EJson::Array))
+			{ OutError = FString::Printf(TEXT("Input '%s' requires a JSON object or array"), *Name); return false; }
+		}
 		// Options validation for string types with dropdown
 		if (Options.Num() > 0 && Type == EAtlasValueType::String)
 		{

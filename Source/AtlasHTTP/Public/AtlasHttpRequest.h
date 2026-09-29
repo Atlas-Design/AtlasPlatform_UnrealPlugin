@@ -11,6 +11,8 @@
 
 class UAtlasJsonObject;
 
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnAtlasTransferProgress, UAtlasHttpRequest*, Request, int64, BytesSent, int64, BytesReceived);
+
 // Delegate declarations
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnAtlasRequestComplete, UAtlasHttpRequest*, Request, UAtlasJsonObject*, ResponseJson, int32, StatusCode);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnAtlasRequestFailed, UAtlasHttpRequest*, Request, const FString&, ErrorMessage, int32, StatusCode);
@@ -91,6 +93,8 @@ public:
 	/** Execute the HTTP request. Bind to OnRequestComplete/OnRequestFailed before calling. */
 	UFUNCTION(BlueprintCallable, Category = "AtlasHTTP|Request")
 	void ProcessRequest();
+	void SetBinaryResponse(bool bBinary) { bBinaryResponse = bBinary; }
+	void SetPreflightError(const FString& Reason) { PreflightError = Reason; }
 
 	/** Cancel an in-progress request */
 	UFUNCTION(BlueprintCallable, Category = "AtlasHTTP|Request")
@@ -135,6 +139,8 @@ public:
 	/** Called when the request fails */
 	UPROPERTY(BlueprintAssignable, Category = "AtlasHTTP|Request")
 	FOnAtlasRequestFailed OnRequestFailed;
+	UPROPERTY(BlueprintAssignable, Category="AtlasHTTP|Request")
+	FOnAtlasTransferProgress OnTransferProgress;
 
 private:
 	/** Internal callback when HTTP request completes */
@@ -151,6 +157,8 @@ private:
 
 	/** Configured URL */
 	FString RequestURL;
+	FString PreflightError;
+	bool bBinaryResponse = false;
 
 	/** Configured verb */
 	FString RequestVerb;

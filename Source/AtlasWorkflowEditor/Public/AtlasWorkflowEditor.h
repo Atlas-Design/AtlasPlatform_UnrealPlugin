@@ -15,6 +15,9 @@ public:
     virtual void ShutdownModule() override;
 
 private:
+#if WITH_DEV_AUTOMATION_TESTS
+    friend struct FAtlasLibraryBenchmarkAccess;
+#endif
     void RegisterMenus();
 
     void OpenEditorUtilityWidget(const FString& WidgetAssetPath);

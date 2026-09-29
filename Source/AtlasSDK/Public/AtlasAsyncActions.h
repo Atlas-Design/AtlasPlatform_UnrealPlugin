@@ -123,6 +123,9 @@ protected:
 	void Cleanup();
 
 private:
+#if WITH_DEV_AUTOMATION_TESTS
+	friend struct FAtlasLifetimeTestAccess;
+#endif
 	/** World context for timers */
 	UPROPERTY()
 	TObjectPtr<UObject> WorldContext;
@@ -153,8 +156,8 @@ private:
 	UPROPERTY()
 	TObjectPtr<UObject> StoredUserObject = nullptr;
 
-	/** Whether we created the managers internally (need cleanup) */
-	bool bOwnManagers = false;
+	/** Prevent reactivation while executing or after completion. */
+	bool bHasActivated = false;
 
 	/** Whether action has completed */
 	bool bHasCompleted = false;

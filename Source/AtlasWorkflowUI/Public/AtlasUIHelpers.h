@@ -15,6 +15,8 @@ class UAtlasEditorSubsystem;
 class UAtlasJob;
 class UTexture2D;
 class UStaticMesh;
+class UImage;
+class UAtlasOutputManager;
 
 /**
  * Blueprint function library providing helper functions for Atlas UI widgets.
@@ -87,6 +89,14 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Atlas|UI|Workflow")
 	static TArray<UAtlasWorkflowAsset*> GetAllWorkflowAssets();
+	/** Display-only handles; call ResolveWorkflowDisplayAsset before using schema or editing. */
+	UFUNCTION(BlueprintCallable, Category = "Atlas|UI|Workflow")
+	static TArray<UAtlasWorkflowAsset*> GetWorkflowDisplayAssets();
+	UFUNCTION(BlueprintPure, Category = "Atlas|UI|Workflow")
+	static UAtlasWorkflowAsset* ResolveWorkflowDisplayAsset(UAtlasWorkflowAsset* Asset);
+	/** Late previews are ignored when a row is reused or destroyed. */
+	UFUNCTION(BlueprintCallable, Category = "Atlas|UI|Preview")
+	static void LoadPreviewIntoImage(UImage* Image, const FString& FilePath, UAtlasOutputManager* Manager);
 
 	/**
 	 * Get display info for a workflow asset (for dropdown/list display).

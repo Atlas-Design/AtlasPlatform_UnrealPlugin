@@ -7,7 +7,7 @@
 #include "Types/AtlasJobTypes.h"
 #include "Types/AtlasWorkflowTypes.h"
 #include "Types/AtlasErrorTypes.h"
-#include "Engine/TimerHandle.h"
+#include "Containers/Ticker.h"
 #include "AtlasJob.generated.h"
 
 class UAtlasWorkflowAsset;
@@ -52,12 +52,24 @@ class ATLASSDK_API UAtlasJob : public UObject
 
 public:
 	UAtlasJob();
+	virtual void BeginDestroy() override;
+
+	/** Server execution identity; retained through polling retries and written to history. */
+	UPROPERTY(BlueprintReadOnly, Category = "Atlas|Job")
+	FString ExecutionId;
+
+	/** A submitted POST must never be repeated automatically without server idempotency. */
+	bool CanRetryAutomatically() const { return !bExecuteRequestSent && Error.IsRetryable(); }
 
 	// ==================== Identification ====================
 
 	/** Unique identifier for this job */
 	UPROPERTY(BlueprintReadOnly, Category = "Atlas|Job")
 	FGuid JobId;
+
+	/** Retrieval/archive warnings are separate from successful remote execution. */
+	UPROPERTY(BlueprintReadOnly, Category = "Atlas|Job")
+	TArray<FString> OutputWarnings;
 
 	/** API identifier of the workflow being executed */
 	UPROPERTY(BlueprintReadOnly, Category = "Atlas|Job")
@@ -364,15 +376,16 @@ protected:
 
 	/** Copy file-backed inputs into this run's inputs/ archive folder before upload */
 	void ArchiveInputFilesToRunFolder();
+	void ContinueExecution();
 
 	/** Start uploading all pending files */
 	void StartUploadPhase();
 
 	/** Called when a file upload completes */
-	void OnFileUploadComplete(const FGuid& OperationId, const FString& FileId, const FString& InputName);
+	void OnFileUploadComplete(const FGuid& OperationId, const FString& FileId, FString InputName);
 
 	/** Called when a file upload fails */
-	void OnFileUploadFailed(const FGuid& OperationId, const FString& ErrorMessage, int32 StatusCode, const FString& InputName);
+	void OnFileUploadFailed(const FGuid& OperationId, const FString& ErrorMessage, int32 StatusCode, FString InputName);
 
 	/** Check if all uploads are complete */
 	void CheckUploadPhaseComplete();
@@ -410,7 +423,7 @@ protected:
 	void CleanupStatusRequest();
 
 	/** Parse outputs from status response */
-	void ParseStatusResponse(UAtlasJsonObject* ResponseJson);
+	bool ParseStatusResponse(UAtlasJsonObject* ResponseJson);
 
 	/** Start downloading file outputs */
 	void StartDownloadPhase();
@@ -449,11 +462,30 @@ protected:
 	void HandleDownloadFailed(const FGuid& OperationId, const FString& ErrorMessage, int32 HttpStatusCode);
 
 private:
+#if WITH_DEV_AUTOMATION_TESTS
+	friend struct FAtlasNonBatchTestAccess;
+	friend struct FAtlasCancellationTestAccess;
+	friend struct FAtlasSchedulingTestAccess;
+	TFunction<void(UAtlasHttpRequest*)> StatusRequestDispatcherForTests;
+	friend struct FAtlasUploadTestAccess;
+	TFunction<void(UAtlasHttpRequest*)> ExecuteRequestDispatcherForTests;
+#endif
 	/** Flag to prevent multiple Execute() calls */
 	bool bExecutionStarted;
 
 	/** Flag to track cancellation request */
 	bool bCancellationRequested;
+	bool bFinishing = false;
+	bool bSavingOutputs = false;
+	bool bOutputsArchiveAttempted = false;
+	FString ExecutionCredentialScope;
+	float ExecutionRequestTimeout = 120.f;
+	bool CheckExecutionCredentials();
+	UPROPERTY()
+	TObjectPtr<UAtlasWorkflowAsset> ExecutionWorkflow;
+	UAtlasWorkflowAsset* GetExecutionWorkflow() const;
+	double StartedMonotonic = -1.0;
+	double FinishedMonotonic = -1.0;
 
 	/** File manager for uploads/downloads */
 	UPROPERTY()
@@ -467,11 +499,15 @@ private:
 	UPROPERTY()
 	TObjectPtr<UAtlasHttpRequest> StatusRequest;
 
-	/** Execution ID returned from async execute */
-	FString ExecutionId;
+	/** Once dispatch is attempted, automatic whole-job replay is unsafe. */
+	bool bExecuteRequestSent = false;
+	int32 ConsecutivePollFailures = 0;
+	void SchedulePoll(float DelaySeconds);
+	void HandlePollError(const FAtlasError& PollError);
+	void StartExecutionTimeout();
 
 	/** Timer handle for status polling */
-	FTimerHandle StatusPollTimerHandle;
+	FTSTicker::FDelegateHandle StatusPollTimerHandle;
 
 	/** Polling interval in seconds (read from UAtlasSDKSettings on Execute) */
 	float PollIntervalSeconds = 5.0f;
@@ -480,12 +516,15 @@ private:
 	float MaxExecutionTimeSeconds = 900.0f;
 
 	/** Timer handle for execution timeout */
-	FTimerHandle ExecutionTimeoutHandle;
+	FTSTicker::FDelegateHandle ExecutionTimeoutHandle;
 
 	/** Called when execution exceeds MaxExecutionTimeSeconds */
 	void OnExecutionTimeout();
 
 	// ==================== Upload Tracking ====================
+
+	/** Prevent synchronous completions from advancing the pipeline during dispatch. */
+	bool bStartingUploads = false;
 
 	/** Files that need uploading: InputName -> FilePath */
 	TMap<FString, FString> FilesToUpload;
@@ -502,6 +541,7 @@ private:
 	/** Number of upload failures */
 	int32 UploadFailures;
 
+	bool bStartingDownloads = false;
 	// ==================== Download Tracking ====================
 
 	/** Files that need downloading: OutputName -> FileId */
@@ -511,7 +551,7 @@ private:
 	TMap<FGuid, FString> DownloadOperations;
 
 	/** Downloaded file data: OutputName -> FileData */
-	TMap<FString, TArray<uint8>> DownloadedFiles;
+
 
 	/** Number of downloads completed (success or fail) */
 	int32 DownloadsCompleted;
@@ -520,6 +560,7 @@ private:
 	int32 DownloadFailures;
 
 	// Grant access to internal methods for the job manager and pipeline
+	friend class UAtlasHistoryManager;
 	friend class UAtlasJobManager;
 	friend class FAtlasJobPipeline;
 };

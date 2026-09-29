@@ -5,6 +5,7 @@
 #include "AtlasJob.h"
 #include "AtlasJobManager.h"
 #include "AtlasFileManager.h"
+#include "UObject/StrongObjectPtr.h"
 
 UAtlasExecuteWorkflowAction* UAtlasExecuteWorkflowAction::ExecuteWorkflow(
 	UObject* WorldContextObject,
@@ -31,6 +32,8 @@ UAtlasExecuteWorkflowAction* UAtlasExecuteWorkflowAction::ExecuteWorkflow(
 
 void UAtlasExecuteWorkflowAction::Activate()
 {
+	if (bHasActivated || bHasCompleted) return;
+	bHasActivated = true;
 	// Validate workflow asset
 	if (!IsValid(Workflow))
 	{
@@ -59,13 +62,11 @@ void UAtlasExecuteWorkflowAction::Activate()
 	if (!Manager)
 	{
 		Manager = NewObject<UAtlasJobManager>(this);
-		bOwnManagers = true;
 	}
 
 	if (!FileMgr)
 	{
 		FileMgr = NewObject<UAtlasFileManager>(this);
-		bOwnManagers = true;
 	}
 
 	// Ensure manager has file manager
@@ -130,6 +131,8 @@ void UAtlasExecuteWorkflowAction::CompleteWithSuccess()
 	}
 
 	bHasCompleted = true;
+	// Listeners may run GC or unregister this action during either callback.
+	TStrongObjectPtr<UAtlasExecuteWorkflowAction> KeepAlive(this);
 
 	FAtlasExecutionResult Result;
 	Result.bSuccess = true;
@@ -153,6 +156,7 @@ void UAtlasExecuteWorkflowAction::CompleteWithError(const FAtlasError& InError)
 	}
 
 	bHasCompleted = true;
+	TStrongObjectPtr<UAtlasExecuteWorkflowAction> KeepAlive(this);
 
 	FAtlasExecutionResult Result;
 	Result.bSuccess = false;
@@ -176,6 +180,13 @@ void UAtlasExecuteWorkflowAction::Cleanup()
 		CurrentJob->OnStateChanged.RemoveDynamic(this, &UAtlasExecuteWorkflowAction::OnJobStateChanged);
 	}
 
-	// Note: Don't destroy managers - let GC handle them
-	// The job is stored in history by the manager
+	CurrentJob = nullptr;
+	Manager = nullptr;
+	FileMgr = nullptr;
+	Workflow = nullptr;
+	WorldContext = nullptr;
+	StoredUserObject = nullptr;
+	InputValues.Values.Empty();
+	// Release game-instance retention after both result delegates have been delivered.
+	SetReadyToDestroy();
 }

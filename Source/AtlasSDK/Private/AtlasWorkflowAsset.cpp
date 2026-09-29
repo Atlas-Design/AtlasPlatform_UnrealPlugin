@@ -9,6 +9,7 @@
 #include "Misc/FileHelper.h"
 #include "UObject/Package.h"
 #include "AssetRegistry/AssetRegistryModule.h"
+#include "UObject/AssetRegistryTagsContext.h"
 
 UAtlasWorkflowAsset::UAtlasWorkflowAsset()
 {
@@ -78,12 +79,18 @@ bool UAtlasWorkflowAsset::ParseJsonObject(const TSharedPtr<FJsonObject>& JsonObj
 		JsonObject->TryGetStringField(TEXT("baseUrl"), OutSchema.BaseUrl);
 	}
 
+	for (const TCHAR* Field : { TEXT("inputs"), TEXT("outputs") })
+	{
+		const TSharedPtr<FJsonValue> Value = JsonObject->TryGetField(Field);
+		if (Value.IsValid() && Value->Type != EJson::Array) { OutError = FString(Field) + TEXT(" must be an array"); return false; }
+	}
 	// Parse inputs array
 	const TArray<TSharedPtr<FJsonValue>>* InputsArray = nullptr;
 	if (JsonObject->TryGetArrayField(TEXT("inputs"), InputsArray) && InputsArray)
 	{
 		for (const TSharedPtr<FJsonValue>& InputValue : *InputsArray)
 		{
+			if (!InputValue.IsValid() || InputValue->Type != EJson::Object) { OutError = TEXT("Input definition must be an object"); return false; }
 			if (InputValue.IsValid() && InputValue->Type == EJson::Object)
 			{
 				FAtlasParameterDef ParamDef;
@@ -94,7 +101,8 @@ bool UAtlasWorkflowAsset::ParseJsonObject(const TSharedPtr<FJsonObject>& JsonObj
 				}
 				else
 				{
-					UE_LOG(LogTemp, Warning, TEXT("Failed to parse input parameter: %s"), *ParamError);
+					OutError = ParamError;
+					return false;
 				}
 			}
 		}
@@ -106,6 +114,7 @@ bool UAtlasWorkflowAsset::ParseJsonObject(const TSharedPtr<FJsonObject>& JsonObj
 	{
 		for (const TSharedPtr<FJsonValue>& OutputValue : *OutputsArray)
 		{
+			if (!OutputValue.IsValid() || OutputValue->Type != EJson::Object) { OutError = TEXT("Output definition must be an object"); return false; }
 			if (OutputValue.IsValid() && OutputValue->Type == EJson::Object)
 			{
 				FAtlasParameterDef ParamDef;
@@ -116,12 +125,33 @@ bool UAtlasWorkflowAsset::ParseJsonObject(const TSharedPtr<FJsonObject>& JsonObj
 				}
 				else
 				{
-					UE_LOG(LogTemp, Warning, TEXT("Failed to parse output parameter: %s"), *ParamError);
+					OutError = ParamError;
+					return false;
 				}
 			}
 		}
 	}
 
+	for (const auto* Parameters : { &OutSchema.Inputs, &OutSchema.Outputs })
+	{
+		TSet<FString> Names;
+		for (const FAtlasParameterDef& Def : *Parameters)
+		{
+			if (Def.Name.IsEmpty() || Names.Contains(Def.Name)
+				|| (Def.bHasMinimum && !FMath::IsFinite(Def.MinValue)) || (Def.bHasMaximum && !FMath::IsFinite(Def.MaxValue))
+				|| (Def.bHasMinimum && Def.bHasMaximum && Def.MinValue > Def.MaxValue))
+			{
+				OutError = TEXT("Schema contains an empty/duplicate parameter or invalid numeric bounds");
+				return false;
+			}
+			Names.Add(Def.Name);
+		}
+	}
+	if (OutSchema.ApiId.IsEmpty() || OutSchema.BaseUrl.IsEmpty() || OutSchema.Version.IsEmpty())
+	{
+		OutError = TEXT("Workflow requires api_id, base_url and version");
+		return false;
+	}
 	return true;
 }
 
@@ -161,6 +191,8 @@ bool UAtlasWorkflowAsset::ParseParameterDef(const TSharedPtr<FJsonObject>& JsonO
 	if (JsonObject->TryGetStringField(TEXT("type"), TypeString))
 	{
 		OutDef.Type = StringToValueType(TypeString);
+		if (OutDef.Type == EAtlasValueType::String && !TypeString.Equals(TEXT("string"), ESearchCase::IgnoreCase) && !TypeString.Equals(TEXT("text"), ESearchCase::IgnoreCase))
+		{ OutError = FString::Printf(TEXT("Unsupported parameter type: %s"), *TypeString); return false; }
 	}
 
 	// Default value - handle multiple field names and non-string types
@@ -197,8 +229,7 @@ bool UAtlasWorkflowAsset::ParseParameterDef(const TSharedPtr<FJsonObject>& JsonO
 			OutDef.DefaultValue.Empty();
 			break;
 		default:
-			// For objects/arrays, try to serialize back to string
-			OutDef.DefaultValue.Empty();
+			FJsonSerializer::Serialize(DefaultValue.ToSharedRef(), TEXT(""), TJsonWriterFactory<>::Create(&OutDef.DefaultValue));
 			break;
 		}
 	}
@@ -208,11 +239,13 @@ bool UAtlasWorkflowAsset::ParseParameterDef(const TSharedPtr<FJsonObject>& JsonO
 	if (JsonObject->TryGetNumberField(TEXT("min"), MinVal))
 	{
 		OutDef.MinValue = (float)MinVal;
+		OutDef.bHasMinimum = true;
 		OutDef.bHasRange = true;
 	}
 	if (JsonObject->TryGetNumberField(TEXT("max"), MaxVal))
 	{
 		OutDef.MaxValue = (float)MaxVal;
+		OutDef.bHasMaximum = true;
 		OutDef.bHasRange = true;
 	}
 
@@ -445,22 +478,10 @@ UAtlasWorkflowAsset* UAtlasWorkflowAsset::ImportFromFile(const FString& FilePath
 	// Check if a workflow with this API ID already exists
 	if (!TestSchema.ApiId.IsEmpty())
 	{
-		IAssetRegistry& AssetRegistry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry").Get();
-		
-		TArray<FAssetData> AllWorkflowAssets;
-		AssetRegistry.GetAssetsByClass(UAtlasWorkflowAsset::StaticClass()->GetClassPathName(), AllWorkflowAssets);
-		
-		for (const FAssetData& AssetData : AllWorkflowAssets)
+		if (UAtlasWorkflowAsset* Existing = FindWorkflowByApiId(TestSchema.ApiId))
 		{
-			if (UAtlasWorkflowAsset* ExistingAsset = Cast<UAtlasWorkflowAsset>(AssetData.GetAsset()))
-			{
-				if (ExistingAsset->GetApiId() == TestSchema.ApiId)
-				{
-					OutError = FString::Printf(TEXT("A workflow with API ID '%s' already exists: %s"), 
-						*TestSchema.ApiId, *AssetData.GetObjectPathString());
-					return nullptr;
-				}
-			}
+			OutError = FString::Printf(TEXT("A workflow with API ID '%s' already exists: %s"), *TestSchema.ApiId, *Existing->GetPathName());
+			return nullptr;
 		}
 	}
 
@@ -515,5 +536,45 @@ void UAtlasWorkflowAsset::PostEditChangeProperty(FPropertyChangedEvent& Property
 	{
 		ParseFromJson();
 	}
+}
+#endif
+
+TArray<FAtlasWorkflowCatalogEntry> UAtlasWorkflowAsset::GetWorkflowCatalog()
+{
+	TArray<FAssetData> Assets;
+	FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get().GetAssetsByClass(StaticClass()->GetClassPathName(), Assets);
+	TArray<FAtlasWorkflowCatalogEntry> Entries;
+	Entries.Reserve(Assets.Num());
+	for (const auto& Data : Assets)
+	{
+		FAtlasWorkflowCatalogEntry Entry;
+		Entry.Asset = TSoftObjectPtr<UAtlasWorkflowAsset>(Data.GetSoftObjectPath());
+		Data.GetTagValue(TEXT("AtlasApiId"), Entry.ApiId);
+		Data.GetTagValue(TEXT("AtlasDisplayName"), Entry.DisplayName);
+		if (Entry.DisplayName.IsEmpty()) Entry.DisplayName = Data.AssetName.ToString();
+		Entries.Add(MoveTemp(Entry));
+	}
+	Entries.Sort([](const auto& A, const auto& B) { return A.DisplayName < B.DisplayName; });
+	return Entries;
+}
+
+UAtlasWorkflowAsset* UAtlasWorkflowAsset::FindWorkflowByApiId(const FString& ApiId)
+{
+	const auto Entries = GetWorkflowCatalog();
+	for (const auto& Entry : Entries)
+		if (Entry.ApiId == ApiId) return Entry.Asset.LoadSynchronous();
+	for (const auto& Entry : Entries)
+		if (Entry.ApiId.IsEmpty())
+			if (UAtlasWorkflowAsset* Asset = Entry.Asset.LoadSynchronous())
+				if (Asset->GetApiId() == ApiId) return Asset;
+	return nullptr;
+}
+
+#if WITH_EDITOR
+void UAtlasWorkflowAsset::GetAssetRegistryTags(FAssetRegistryTagsContext Context) const
+{
+	Super::GetAssetRegistryTags(Context);
+	Context.AddTag(FAssetRegistryTag(TEXT("AtlasApiId"), Schema.ApiId, FAssetRegistryTag::TT_Alphabetical));
+	Context.AddTag(FAssetRegistryTag(TEXT("AtlasDisplayName"), GetWorkflowName(), FAssetRegistryTag::TT_Alphabetical));
 }
 #endif

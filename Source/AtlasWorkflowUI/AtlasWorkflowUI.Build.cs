@@ -25,6 +25,9 @@ public class AtlasWorkflowUI : ModuleRules
 			new string[]
 			{
 				"UnrealEd",
+				"BlueprintGraph",
+				"KismetCompiler",
+				"Kismet",
 				"EditorStyle",
 				"InputCore",
 				"AssetTools",

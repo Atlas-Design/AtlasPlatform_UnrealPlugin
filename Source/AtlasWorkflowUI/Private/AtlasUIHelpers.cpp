@@ -1,6 +1,9 @@
 // Copyright Atlas Platform. All Rights Reserved.
 
 #include "AtlasUIHelpers.h"
+#include "AtlasOutputManager.h"
+#include "Components/Image.h"
+#include "AtlasLibraryProfiler.h"
 #include "AtlasEditorSubsystem.h"
 #include "AtlasJob.h"
 #include "AtlasOutputManager.h"
@@ -85,21 +88,11 @@ bool UAtlasUIHelpers::ImportWorkflowFromPath(const FString& FilePath, UAtlasWork
 
 TArray<UAtlasWorkflowAsset*> UAtlasUIHelpers::GetAllWorkflowAssets()
 {
+	FAtlasLibraryProfileScope Profile(TEXT("Workflow.DiscoverUI"));
 	TArray<UAtlasWorkflowAsset*> Results;
 
-	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
-	IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
-
-	TArray<FAssetData> AssetDataList;
-	AssetRegistry.GetAssetsByClass(UAtlasWorkflowAsset::StaticClass()->GetClassPathName(), AssetDataList);
-
-	for (const FAssetData& AssetData : AssetDataList)
-	{
-		if (UAtlasWorkflowAsset* Asset = Cast<UAtlasWorkflowAsset>(AssetData.GetAsset()))
-		{
-			Results.Add(Asset);
-		}
-	}
+	for (const auto& Entry : UAtlasWorkflowAsset::GetWorkflowCatalog())
+		if (UAtlasWorkflowAsset* Asset = Entry.Asset.LoadSynchronous()) Results.Add(Asset);
 
 	return Results;
 }
@@ -446,6 +439,7 @@ bool UAtlasUIHelpers::OpenFolder(const FString& FolderPath)
 
 UTexture2D* UAtlasUIHelpers::LoadImageFromDisk(const FString& FilePath)
 {
+	FAtlasLibraryProfileScope Profile(TEXT("Preview.LoadImage"));
 	if (FilePath.IsEmpty() || !FPaths::FileExists(FilePath))
 	{
 		return nullptr;
@@ -915,4 +909,41 @@ bool UAtlasUIHelpers::OpenBatchDraftPicker(FString& OutFilePath)
 		TEXT("JSON Files (*.json)|*.json"),
 		OutFilePath
 	);
+}
+
+TArray<UAtlasWorkflowAsset*> UAtlasUIHelpers::GetWorkflowDisplayAssets()
+{
+	TArray<UAtlasWorkflowAsset*> Results;
+	for (const auto& Entry : UAtlasWorkflowAsset::GetWorkflowCatalog())
+	{
+		UAtlasWorkflowAsset* Display = NewObject<UAtlasWorkflowAsset>();
+		Display->CatalogSource = Entry.Asset;
+		Display->Schema.Name = Entry.DisplayName;
+		Display->Schema.ApiId = Entry.ApiId;
+		Display->bIsValid = true;
+		Results.Add(Display);
+	}
+	return Results;
+}
+UAtlasWorkflowAsset* UAtlasUIHelpers::ResolveWorkflowDisplayAsset(UAtlasWorkflowAsset* Asset)
+{
+	return Asset && !Asset->CatalogSource.IsNull() ? Asset->CatalogSource.LoadSynchronous() : Asset;
+}
+
+void UAtlasUIHelpers::LoadPreviewIntoImage(UImage* Image, const FString& FilePath, UAtlasOutputManager* Manager)
+{
+	static TMap<TWeakObjectPtr<UImage>, uint64> Generations;
+	static uint64 NextGeneration = 0;
+	for (auto It = Generations.CreateIterator(); It; ++It) if (!It.Key().IsValid()) It.RemoveCurrent();
+	if (!Image) return;
+	const TWeakObjectPtr<UImage> WeakImage(Image);
+	const uint64 Generation = ++NextGeneration;
+	Generations.Add(WeakImage, Generation);
+	Image->SetBrushFromTexture(nullptr);
+	if (!Manager || FilePath.IsEmpty()) return;
+	Manager->LoadPreviewAsync(FilePath, [WeakImage, Generation](UTexture2D* Texture)
+	{
+		if (UImage* Target = WeakImage.Get())
+			if (Generations.FindRef(WeakImage) == Generation) Target->SetBrushFromTexture(Texture);
+	});
 }

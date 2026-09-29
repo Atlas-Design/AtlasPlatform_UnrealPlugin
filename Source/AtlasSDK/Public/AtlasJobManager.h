@@ -6,6 +6,7 @@
 #include "UObject/NoExportTypes.h"
 #include "AtlasJob.h"
 #include "Types/AtlasHistoryTypes.h"
+#include "Types/AtlasBatchTypes.h"
 #include "AtlasJobManager.generated.h"
 
 class UAtlasWorkflowAsset;
@@ -282,6 +283,16 @@ protected:
 	void OnJobStateChanged(UAtlasJob* Job, EAtlasJobState NewState);
 
 private:
+	friend class UAtlasBatchOrchestrator;
+#if WITH_DEV_AUTOMATION_TESTS
+	friend struct FAtlasCancellationTestAccess;
+	friend struct FAtlasLifetimeTestAccess;
+#endif
+	UAtlasJob* CreateJobInternal(const FString& ApiId, const FString& WorkflowName, const FAtlasWorkflowInputs& Inputs, UAtlasWorkflowAsset* Asset);
+	bool bCancellingAllJobs = false;
+	void RetainBatchOrchestrator(UAtlasBatchOrchestrator* Orchestrator);
+	UFUNCTION()
+	void OnBatchOrchestratorComplete(UAtlasBatchOrchestrator* Orchestrator, const FAtlasBatchProgress& Progress);
 	/** Internal helper to bind to job events */
 	void BindJobEvents(UAtlasJob* Job);
 

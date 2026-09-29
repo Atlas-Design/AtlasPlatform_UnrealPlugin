@@ -359,6 +359,8 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Atlas|Output|Preview")
 	UTexture2D* LoadTextureFromFile(const FString& FilePath);
+	/** Background read/decode; callback runs on game thread while this manager is alive. */
+	void LoadPreviewAsync(const FString& FilePath, TFunction<void(UTexture2D*)> OnLoaded);
 
 	// ==================== Job-Based Path Helpers ====================
 
@@ -675,4 +677,11 @@ public:
 protected:
 	/** Internal save implementation */
 	FAtlasSaveResult SaveBytesToPath(const TArray<uint8>& Bytes, const FString& FullPath);
+
+private:
+	UPROPERTY(Transient)
+	TMap<FString, TObjectPtr<UTexture2D>> PreviewCache;
+	TArray<FString> PreviewCacheOrder;
+	TMap<FString, FString> PreviewFiles;
+	void CachePreview(const FString& Key, UTexture2D* Texture);
 };

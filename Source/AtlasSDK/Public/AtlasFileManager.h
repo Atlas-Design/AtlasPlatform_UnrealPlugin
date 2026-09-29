@@ -45,6 +45,7 @@ struct FAtlasPendingUpload
 
 	/** Content hash of the file being uploaded */
 	FString ContentHash;
+	FString CacheKey;
 
 	/** Original filename */
 	FString FileName;
@@ -79,6 +80,8 @@ struct FAtlasPendingDownload
 
 	/** Download URL */
 	FString DownloadUrl;
+	FString CacheKey;
+	FString Extension;
 
 	/** The HTTP request performing the download */
 	UPROPERTY()
@@ -124,6 +127,12 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Atlas|FileManager", meta = (DisplayName = "Upload File"))
 	FGuid UploadFile(UAtlasWorkflowAsset* WorkflowAsset, const FString& FilePath);
+
+	/** Native upload entry point for callers that register an ID before synchronous callbacks.
+	 * Supply a fresh, valid ID. Returns invalid on validation/read failure; otherwise callbacks
+	 * use OperationId and may occur before this method returns (including immediate failure).
+	 */
+	FGuid UploadFileWithOperationId(UAtlasWorkflowAsset* WorkflowAsset, const FString& FilePath, const FGuid& OperationId);
 
 	/**
 	 * Upload file data directly (bytes + filename) for a workflow.
@@ -191,6 +200,12 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Atlas|FileManager", meta = (DisplayName = "Download File"))
 	FGuid DownloadFile(UAtlasWorkflowAsset* WorkflowAsset, const FString& FileId);
+	FString GetDownloadExtension(const FGuid& OperationId) const;
+	FString GetTransferResponse(const FGuid& OperationId) const;
+
+	/** Native pipeline entry point: ownership is registered before callbacks can fire. */
+	FGuid DownloadFileWithOperationId(UAtlasWorkflowAsset* WorkflowAsset, const FString& FileId, const FGuid& OperationId);
+	FGuid DownloadFileFromUrlWithOperationId(const FString& DownloadUrl, const FString& FileId, const FGuid& OperationId);
 
 	// ==================== File Download (URL API - Advanced) ====================
 
@@ -365,12 +380,33 @@ protected:
 	void RemovePendingDownload(const FGuid& OperationId);
 
 private:
+	FGuid UploadFileToUrlWithOperationId(const FString& UploadUrl, const FString& FilePath, const FGuid& OperationId);
+	FGuid UploadFileDataToUrlWithOperationId(const FString& UploadUrl, const TArray<uint8>& FileData, const FString& FileName, const FGuid& OperationId, const FString& PreparedHash = FString());
+	struct FQueuedUpload { FGuid Id; FString Url, Path, Scope; };
+	TArray<FQueuedUpload> QueuedUploads;
+	bool bPreparingUpload = false;
+	void PrepareNextUpload();
+#if WITH_DEV_AUTOMATION_TESTS
+	friend struct FAtlasNonBatchTestAccess;
+	friend struct FAtlasCancellationTestAccess;
+	friend struct FAtlasUploadTestAccess;
+	// Exercise production request callbacks without sending a network request.
+	TFunction<void(UAtlasHttpRequest*)> UploadRequestDispatcherForTests;
+#endif
 	/** Upload cache: ContentHash → FileId */
 	UPROPERTY()
 	TMap<FString, FString> UploadCache;
 
 	/** Download cache: FileId → FileData (Phase 6) */
 	TMap<FString, TArray<uint8>> DownloadCache;
+	TMap<FString, double> UploadCacheTimes;
+	TMap<FString, double> DownloadCacheTimes;
+	TMap<FString, FString> DownloadCacheExtensions;
+	FString LastUploadUrl, LastDownloadUrl;
+	static FString CacheKeyFor(const FString& Url, const FString& Identity);
+	void PruneCaches();
+	UFUNCTION()
+	void HandleTransferProgress(UAtlasHttpRequest* Request, int64 Sent, int64 Received);
 
 	/** Pending upload operations */
 	UPROPERTY()

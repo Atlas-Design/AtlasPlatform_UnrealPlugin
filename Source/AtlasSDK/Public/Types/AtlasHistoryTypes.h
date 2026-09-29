@@ -62,6 +62,18 @@ struct ATLASSDK_API FAtlasJobHistoryRecord
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Atlas|History")
 	FGuid JobId;
 
+	/** Server execution ID, if the execute response was received. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Atlas|History")
+	FString ExecutionId;
+
+	/** UTC for new records; legacy archives retain an explicit unknown time basis. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Atlas|History")
+	FString TimeBasis;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Atlas|History")
+	FString WorkflowSchemaJson;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Atlas|History")
+	TArray<FString> OutputWarnings;
+
 	/** API identifier of the workflow */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Atlas|History")
 	FString ApiId;

@@ -1,6 +1,9 @@
 // Copyright Atlas Platform. All Rights Reserved.
 
 #include "AtlasJobManager.h"
+#include "AtlasArchiveSafety.h"
+#include "UObject/StrongObjectPtr.h"
+#include "AtlasLibraryProfiler.h"
 #include "AtlasWorkflowAsset.h"
 #include "AtlasFileManager.h"
 #include "AtlasHistoryManager.h"
@@ -44,7 +47,7 @@ void UAtlasJobManager::CreateOutputManagerIfNeeded()
 
 void UAtlasJobManager::AutoSaveJobOutputs(UAtlasJob* Job)
 {
-	if (!IsValid(Job))
+	if (!IsValid(Job) || Job->bOutputsArchiveAttempted)
 	{
 		return;
 	}
@@ -99,7 +102,7 @@ void UAtlasJobManager::AutoSaveJobOutputs(UAtlasJob* Job)
 		}
 
 		// Create deterministic filename: Output_{OutputName}{Extension}
-		const FString SafeOutputName = UAtlasOutputManager::SanitizeParameterName(OutputName);
+		const FString SafeOutputName = AtlasArchive::Component(OutputName);
 		FString FileName = FString::Printf(TEXT("Output_%s%s"), *SafeOutputName, *Extension);
 		
 		// Save the file into the run's outputs/ folder.
@@ -116,6 +119,7 @@ void UAtlasJobManager::AutoSaveJobOutputs(UAtlasJob* Job)
 		}
 		else
 		{
+			Job->OutputWarnings.Add(FString::Printf(TEXT("Save %s: %s"), *OutputName, *SaveResult.ErrorMessage));
 			UE_LOG(LogTemp, Warning, TEXT("AtlasJobManager: Failed to auto-save output '%s': %s"),
 				*OutputName, *SaveResult.ErrorMessage);
 		}
@@ -126,9 +130,17 @@ void UAtlasJobManager::AutoSaveJobOutputs(UAtlasJob* Job)
 
 UAtlasJob* UAtlasJobManager::CreateJob(const FString& ApiId, const FString& WorkflowName, const FAtlasWorkflowInputs& Inputs)
 {
+	return CreateJobInternal(ApiId, WorkflowName, Inputs, nullptr);
+}
+
+UAtlasJob* UAtlasJobManager::CreateJobInternal(const FString& ApiId, const FString& WorkflowName, const FAtlasWorkflowInputs& Inputs, UAtlasWorkflowAsset* Asset)
+{
+	if (bCancellingAllJobs) return nullptr;
 	// Create new job object owned by this manager
 	UAtlasJob* NewJob = NewObject<UAtlasJob>(this);
 	NewJob->Initialize(ApiId, WorkflowName, Inputs);
+	NewJob->SetWorkflowAsset(Asset);
+	TStrongObjectPtr<UAtlasJob> KeepAlive(NewJob);
 	
 	// Set the FileManager for uploads/downloads
 	if (FileManager)
@@ -157,6 +169,7 @@ UAtlasJob* UAtlasJobManager::CreateJob(const FString& ApiId, const FString& Work
 
 UAtlasJob* UAtlasJobManager::CreateJobFromAsset(UAtlasWorkflowAsset* WorkflowAsset, const FAtlasWorkflowInputs& Inputs)
 {
+	if (WorkflowAsset && !WorkflowAsset->CatalogSource.IsNull()) WorkflowAsset = WorkflowAsset->CatalogSource.LoadSynchronous();
 	if (!IsValid(WorkflowAsset))
 	{
 		UE_LOG(LogTemp, Warning, TEXT("AtlasJobManager::CreateJobFromAsset called with invalid asset"));
@@ -169,11 +182,7 @@ UAtlasJob* UAtlasJobManager::CreateJobFromAsset(UAtlasWorkflowAsset* WorkflowAss
 		return nullptr;
 	}
 
-	UAtlasJob* NewJob = CreateJob(
-		WorkflowAsset->GetApiId(),
-		WorkflowAsset->GetWorkflowName(),
-		Inputs
-	);
+	UAtlasJob* NewJob = CreateJobInternal(WorkflowAsset->GetApiId(), WorkflowAsset->GetWorkflowName(), Inputs, WorkflowAsset);
 
 	if (NewJob)
 	{
@@ -260,21 +269,26 @@ void UAtlasJobManager::CancelJob(UAtlasJob* Job)
 
 void UAtlasJobManager::CancelAllJobs()
 {
-	UE_LOG(LogTemp, Log, TEXT("AtlasJobManager: Cancelling all %d jobs"), ActiveJobs.Num());
+	if (bCancellingAllJobs) return;
+	TStrongObjectPtr<UAtlasJobManager> KeepAlive(this);
+	TGuardValue<bool> Cancelling(bCancellingAllJobs, true);
 
-	// Cancel each job - make a copy since cancellation may modify the array
-	TArray<TObjectPtr<UAtlasJob>> JobsCopy = ActiveJobs;
-	
-	for (const TObjectPtr<UAtlasJob>& Job : JobsCopy)
+	// Hold both snapshots across callbacks, including callbacks that release manager retention.
+	TArray<TStrongObjectPtr<UAtlasJob>> Jobs;
+	for (UAtlasJob* Job : ActiveJobs)
 	{
-		if (IsValid(Job))
-		{
-			Job->Cancel();
-		}
+		if (IsValid(Job)) Jobs.Emplace(Job);
 	}
-
-	// Clear the list (jobs should have been removed by OnJobStateChanged, but ensure clean state)
-	ActiveJobs.Empty();
+	TArray<TStrongObjectPtr<UAtlasBatchOrchestrator>> Batches;
+	for (UAtlasBatchOrchestrator* Batch : ActiveOrchestrators)
+	{
+		if (IsValid(Batch)) Batches.Emplace(Batch);
+	}
+	// The manager guard blocks dispatch in EVERY batch before the first cancellation event.
+	for (const auto& Batch : Batches) Batch->CancelBatch();
+	for (const auto& Job : Jobs) Job->Cancel();
+	// Terminal-state handlers remove jobs; never discard newly created work blindly.
+	ActiveJobs.RemoveAll([](const TObjectPtr<UAtlasJob>& Job) { return !IsValid(Job); });
 }
 
 bool UAtlasJobManager::RemoveJob(UAtlasJob* Job)
@@ -320,16 +334,30 @@ TArray<UAtlasJob*> UAtlasJobManager::GetJobsByBatchId(const FString& InBatchId) 
 UAtlasBatchOrchestrator* UAtlasJobManager::CreateBatchOrchestrator()
 {
 	UAtlasBatchOrchestrator* Orchestrator = NewObject<UAtlasBatchOrchestrator>(this);
-	ActiveOrchestrators.Add(Orchestrator);
-
-	// Clean up finished orchestrators while we're here
-	ActiveOrchestrators.RemoveAll([](const TObjectPtr<UAtlasBatchOrchestrator>& Orch)
-	{
-		return !IsValid(Orch) || !Orch->IsRunning();
-	});
-
+	RetainBatchOrchestrator(Orchestrator);
 	UE_LOG(LogTemp, Log, TEXT("AtlasJobManager: Created batch orchestrator (active: %d)"), ActiveOrchestrators.Num());
 	return Orchestrator;
+}
+
+void UAtlasJobManager::RetainBatchOrchestrator(UAtlasBatchOrchestrator* Orchestrator)
+{
+	// A not-yet-started orchestrator is intentionally retained. !IsRunning() is not
+	// a completion test: it also describes every object returned by CreateBatchOrchestrator.
+	ActiveOrchestrators.RemoveAll([](const TObjectPtr<UAtlasBatchOrchestrator>& Orch)
+	{
+		return !IsValid(Orch);
+	});
+	ActiveOrchestrators.AddUnique(Orchestrator);
+	Orchestrator->OnBatchComplete.AddUniqueDynamic(this, &UAtlasJobManager::OnBatchOrchestratorComplete);
+}
+
+void UAtlasJobManager::OnBatchOrchestratorComplete(UAtlasBatchOrchestrator* Orchestrator, const FAtlasBatchProgress& Progress)
+{
+	// Another listener may already have restarted this object.
+	if (IsValid(Orchestrator) && !Orchestrator->IsRunning())
+	{
+		ActiveOrchestrators.Remove(Orchestrator);
+	}
 }
 
 // ==================== Configuration ====================
@@ -345,6 +373,7 @@ void UAtlasJobManager::SetFileManager(UAtlasFileManager* InFileManager)
 
 TArray<UAtlasWorkflowAsset*> UAtlasJobManager::GetAllWorkflowAssets() const
 {
+	FAtlasLibraryProfileScope Profile(TEXT("Workflow.DiscoverManager"));
 	TArray<UAtlasWorkflowAsset*> Result;
 
 	// Query the Asset Registry for all UAtlasWorkflowAsset instances
@@ -410,23 +439,16 @@ UAtlasJob* UAtlasJobManager::RerunFromHistory(const FAtlasJobHistoryRecord& Reco
 		return nullptr;
 	}
 
+	FAtlasWorkflowInputs RestoredInputs = Record.Inputs;
+	for (auto& Pair : RestoredInputs.Values)
+		if (!Pair.Value.FilePath.IsEmpty() && !AtlasArchive::IsContained(UAtlasSDKSettings::Get()->GetOutputFolderPath(), Pair.Value.FilePath)) Pair.Value.FilePath.Empty();
 	// Try to find the workflow asset for this ApiId
-	TArray<UAtlasWorkflowAsset*> AllAssets = GetAllWorkflowAssets();
-	UAtlasWorkflowAsset* FoundAsset = nullptr;
-
-	for (UAtlasWorkflowAsset* Asset : AllAssets)
-	{
-		if (Asset && Asset->GetApiId() == Record.ApiId)
-		{
-			FoundAsset = Asset;
-			break;
-		}
-	}
+	UAtlasWorkflowAsset* FoundAsset = UAtlasWorkflowAsset::FindWorkflowByApiId(Record.ApiId);
 
 	if (FoundAsset)
 	{
 		// Create job from asset with restored inputs
-		UAtlasJob* NewJob = CreateJobFromAsset(FoundAsset, Record.Inputs);
+		UAtlasJob* NewJob = CreateJobFromAsset(FoundAsset, RestoredInputs);
 		UE_LOG(LogTemp, Log, TEXT("AtlasJobManager: Rerunning job from history (original: %s, new: %s)"),
 			*Record.JobId.ToString(EGuidFormats::DigitsWithHyphens),
 			NewJob ? *NewJob->JobId.ToString(EGuidFormats::DigitsWithHyphens) : TEXT("nullptr"));
@@ -435,7 +457,7 @@ UAtlasJob* UAtlasJobManager::RerunFromHistory(const FAtlasJobHistoryRecord& Reco
 	else
 	{
 		// Create job without asset (will need manual execution setup)
-		UAtlasJob* NewJob = CreateJob(Record.ApiId, Record.WorkflowName, Record.Inputs);
+		UAtlasJob* NewJob = CreateJob(Record.ApiId, Record.WorkflowName, RestoredInputs);
 		UE_LOG(LogTemp, Warning, TEXT("AtlasJobManager: Rerunning job from history without asset (ApiId: %s)"),
 			*Record.ApiId);
 		return NewJob;
@@ -496,21 +518,7 @@ void UAtlasJobManager::OnJobStateChanged(UAtlasJob* Job, EAtlasJobState NewState
 	if (NewState == EAtlasJobState::Running)
 	{
 		CreateHistoryManagerIfNeeded();
-		FAtlasJobHistoryRecord RunningRecord;
-		RunningRecord.JobId = Job->JobId;
-		RunningRecord.ApiId = Job->ApiId;
-		RunningRecord.WorkflowName = Job->WorkflowName;
-		RunningRecord.StartedAt = Job->StartedAt;
-		RunningRecord.Status = EAtlasJobStatus::Running;
-		RunningRecord.BatchId = Job->BatchId;
-		RunningRecord.BatchIndex = Job->BatchIndex;
-		RunningRecord.RetryOfJobId = Job->RetryOfJobId;
-		RunningRecord.Inputs = Job->Inputs;
-		for (auto& Pair : RunningRecord.Inputs.Values)
-		{
-			Pair.Value.FileData.Empty();
-		}
-		HistoryManager->SaveRecord(RunningRecord);
+		HistoryManager->SaveJobToHistory(Job);
 	}
 
 	// Auto-remove completed jobs from active list and save to history

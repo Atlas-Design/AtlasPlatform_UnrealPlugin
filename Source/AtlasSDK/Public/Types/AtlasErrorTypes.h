@@ -3,6 +3,8 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonReader.h"
 #include "AtlasErrorTypes.generated.h"
 
 /**
@@ -225,6 +227,14 @@ struct ATLASSDK_API FAtlasError
 
 		switch (StatusCode)
 		{
+		case 0:
+			ErrorCode = EAtlasErrorCode::NetworkError;
+			ErrorMessage = TEXT("Connection failed");
+			break;
+		case 408:
+			ErrorCode = EAtlasErrorCode::Timeout;
+			ErrorMessage = TEXT("Request timed out");
+			break;
 		case 400:
 			ErrorCode = EAtlasErrorCode::BadRequest;
 			ErrorMessage = TEXT("Bad request");
@@ -262,6 +272,17 @@ struct ATLASSDK_API FAtlasError
 
 		FAtlasError Error(ErrorCode, ErrorMessage, StatusCode);
 		Error.RawResponse = ResponseBody;
+		TSharedPtr<FJsonObject> Detail;
+		if (!ResponseBody.IsEmpty() && FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(ResponseBody), Detail) && Detail.IsValid())
+		{
+			const TSharedPtr<FJsonObject>* Nested = nullptr;
+			if (Detail->TryGetObjectField(TEXT("error"), Nested)) Detail = *Nested;
+			FString Message;
+			if (Detail->TryGetStringField(TEXT("message"), Message) || Detail->TryGetStringField(TEXT("error"), Message)) Error.Message = Message;
+			Detail->TryGetStringField(TEXT("node_name"), Error.NodeName);
+			Detail->TryGetStringField(TEXT("node_type"), Error.NodeType);
+			Detail->TryGetStringField(TEXT("node_id"), Error.NodeId);
+		}
 		return Error;
 	}
 

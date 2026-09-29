@@ -1,53 +1,18 @@
 // Copyright Atlas Games. All Rights Reserved.
 
 #include "AtlasHttpLibrary.h"
+#include "GenericPlatform/GenericPlatformHttp.h"
 #include "Misc/Base64.h"
 #include "Misc/SecureHash.h"
 
 FString UAtlasHttpLibrary::PercentEncode(const FString& Source)
 {
-	// Manual URL encoding
-	FString Result;
-	for (int32 i = 0; i < Source.Len(); i++)
-	{
-		TCHAR Char = Source[i];
-		if ((Char >= 'A' && Char <= 'Z') ||
-			(Char >= 'a' && Char <= 'z') ||
-			(Char >= '0' && Char <= '9') ||
-			Char == '-' || Char == '_' || Char == '.' || Char == '~')
-		{
-			Result.AppendChar(Char);
-		}
-		else
-		{
-			Result += FString::Printf(TEXT("%%%02X"), (uint8)Char);
-		}
-	}
-	return Result;
+	return FGenericPlatformHttp::UrlEncode(Source);
 }
 
 FString UAtlasHttpLibrary::PercentDecode(const FString& Source)
 {
-	FString Result;
-	for (int32 i = 0; i < Source.Len(); i++)
-	{
-		if (Source[i] == '%' && i + 2 < Source.Len())
-		{
-			FString HexStr = Source.Mid(i + 1, 2);
-			int32 HexValue = FParse::HexNumber(*HexStr);
-			Result.AppendChar((TCHAR)HexValue);
-			i += 2;
-		}
-		else if (Source[i] == '+')
-		{
-			Result.AppendChar(' ');
-		}
-		else
-		{
-			Result.AppendChar(Source[i]);
-		}
-	}
-	return Result;
+	return FGenericPlatformHttp::UrlDecode(Source);
 }
 
 FString UAtlasHttpLibrary::Base64Encode(const FString& Source)

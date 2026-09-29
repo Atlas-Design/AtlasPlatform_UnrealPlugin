@@ -1,6 +1,7 @@
 // AtlasWorkflowEditorUtilities.cpp
 
 #include "AtlasWorkflowEditorUtilities.h"
+#include "AtlasOutputManager.h"
 #include "Engine/Engine.h" // Required for GEngine
 #include "IImageWrapperModule.h"
 #include "IImageWrapper.h"
@@ -94,42 +95,10 @@ UTexture2D* UAtlasWorkflowEditorUtilities::CreateTransientTextureFromBytes(
     FString& OutError)
 {
     OutError.Empty();
-
-    int32 W = 0, H = 0;
-    TArray<uint8> RGBA;
-    if (!DecodeImageToRGBA8(ImageBytes, W, H, RGBA))
-    {
-        OutError = TEXT("Failed to decode image bytes.");
-        return nullptr;
-    }
-
-    // Create a transient texture
-    UTexture2D* Tex = UTexture2D::CreateTransient(W, H, PF_R8G8B8A8);
-    if (!Tex)
-    {
-        OutError = TEXT("Failed to create transient texture.");
-        return nullptr;
-    }
-
-    Tex->CompressionSettings = TC_Default;
-    Tex->SRGB = true;
-    Tex->MipGenSettings = TMGS_NoMipmaps;
-    Tex->NeverStream = true;
-
-#if WITH_EDITORONLY_DATA
-    Tex->bUseLegacyGamma = false;
-#endif
-
-    // Copy pixels into mip 0
-    FTexture2DMipMap& Mip = Tex->GetPlatformData()->Mips[0];
-    void* Data = Mip.BulkData.Lock(LOCK_READ_WRITE);
-    const int64 BytesToCopy = (int64)W * (int64)H * 4;
-    FMemory::Memcpy(Data, RGBA.GetData(), BytesToCopy);
-    Mip.BulkData.Unlock();
-
-    Tex->UpdateResource(); // push to RHI
-
-    return Tex; // transient (not saved). You can put it in a widget or material, etc.
+    UAtlasOutputManager* Manager = NewObject<UAtlasOutputManager>();
+    UTexture2D* Texture = Manager->CreateTextureFromImageBytes(ImageBytes);
+    if (!Texture) OutError = TEXT("Image could not be decoded as a bounded preview");
+    return Texture;
 }
 
 void UAtlasWorkflowEditorUtilities::PrintDebugMessage(const FString& Message)
@@ -257,6 +226,7 @@ UTexture2D* UAtlasWorkflowEditorUtilities::CreateTextureFromBytes(
 
     // Basic settings – tweak to taste
     NewTexture->CompressionSettings = TC_Default;
+    NewTexture->CompressionNone = !UAtlasSDKSettings::Get()->bCompressImportedTextures;
     NewTexture->SRGB = true;
     NewTexture->LODGroup = TEXTUREGROUP_World;
     NewTexture->NeverStream = false;

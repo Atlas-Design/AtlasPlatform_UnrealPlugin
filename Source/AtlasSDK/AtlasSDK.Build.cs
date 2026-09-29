@@ -38,6 +38,7 @@ public class AtlasSDK : ModuleRules
 				"SlateCore",
 				"AssetRegistry",
 				"HTTP", // For MD5 hashing
+				"ImageCore",
 				"ImageWrapper", // For decoding PNG/JPEG to raw pixels (thumbnails)
 			}
 		);
@@ -49,6 +50,7 @@ public class AtlasSDK : ModuleRules
 				new string[]
 				{
 					"UnrealEd",
+					"DirectoryWatcher",
 					"ContentBrowser",
 				}
 			);

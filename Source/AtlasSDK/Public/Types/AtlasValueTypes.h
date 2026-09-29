@@ -103,6 +103,16 @@ struct ATLASSDK_API FAtlasValue
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Atlas|Value")
 	FString JsonValue;
 
+	/** Copy reference/scalar metadata without allocating another whole-file buffer. */
+	FAtlasValue WithoutFileData() const
+	{
+		FAtlasValue Copy;
+		Copy.Type = Type; Copy.StringValue = StringValue; Copy.NumberValue = NumberValue;
+		Copy.IntValue = IntValue; Copy.BoolValue = BoolValue; Copy.FilePath = FilePath;
+		Copy.FileId = FileId; Copy.FileName = FileName; Copy.JsonValue = JsonValue;
+		return Copy;
+	}
+
 	// ==================== Constructors ====================
 
 	/** Default constructor - creates an empty/None value */
@@ -353,7 +363,7 @@ struct ATLASSDK_API FAtlasValue
 	/** Get the file ID. Returns empty string if not a file ID type. */
 	FString GetFileId() const
 	{
-		return IsFileId() ? FileId : FString();
+		return (IsFileId() || IsFileType()) ? FileId : FString();
 	}
 
 	/** Get the file path (for input file types). Returns empty string if not set. */

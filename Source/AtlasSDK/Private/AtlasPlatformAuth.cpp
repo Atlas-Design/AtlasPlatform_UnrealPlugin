@@ -35,6 +35,35 @@ FString FAtlasPlatformAuth::GetResolvedApiKey()
 	return Settings ? Settings->GetResolvedWorkspaceApiKey() : FString();
 }
 
+bool FAtlasPlatformAuth::IsTrustedDestination(const FString& Url)
+{
+	auto Origin = [](FString Value) -> FString
+	{
+		if (!Value.StartsWith(TEXT("https://"), ESearchCase::IgnoreCase)) return FString();
+		Value.RightChopInline(8);
+		int32 End = Value.Len();
+		for (int32 i = 0; i < Value.Len(); ++i)
+		{
+			if (Value[i] == TEXT('/') || Value[i] == TEXT('?') || Value[i] == TEXT('#')) { End = i; break; }
+		}
+		Value = Value.Left(End).ToLower();
+		if (Value.IsEmpty()) return FString();
+		for (TCHAR Ch : Value)
+		{
+			if (!(FChar::IsAlnum(Ch) || Ch == TEXT('.') || Ch == TEXT('-') || Ch == TEXT(':'))) return FString();
+		}
+		Value.RemoveFromEnd(TEXT(":443"));
+		return TEXT("https://") + Value;
+	};
+	const FString Target = Origin(Url);
+	if (Target.IsEmpty()) return false;
+	for (const FString& Allowed : UAtlasSDKSettings::Get()->TrustedApiOrigins)
+	{
+		if (Origin(Allowed) == Target) return true;
+	}
+	return false;
+}
+
 void FAtlasPlatformAuth::ApplyPlatformAuthHeaders(UAtlasHttpRequest* Request)
 {
 	if (!Request)
@@ -42,6 +71,11 @@ void FAtlasPlatformAuth::ApplyPlatformAuthHeaders(UAtlasHttpRequest* Request)
 		return;
 	}
 
+	if (!IsTrustedDestination(Request->GetURL()))
+	{
+		Request->SetPreflightError(TEXT("Destination is not a trusted HTTPS API origin. Configure TrustedApiOrigins in Atlas SDK settings."));
+		return;
+	}
 	const FString ApiKey = GetResolvedApiKey();
 	if (ApiKey.IsEmpty())
 	{

@@ -2,6 +2,7 @@
 
 #include "AtlasTempStorageManager.h"
 #include "AtlasSDKSettings.h"
+#include "AtlasTempStorageSafety.h"
 #include "Misc/Paths.h"
 #include "HAL/PlatformFileManager.h"
 #include "HAL/FileManager.h"
@@ -34,8 +35,11 @@ int32 UAtlasTempStorageManager::CleanupTempDirectory()
 	}
 
 	int32 TotalDeleted = 0;
-	TotalDeleted += DeleteDirectoryContents(Settings->GetTempExportFolderPath());
-	TotalDeleted += DeleteDirectoryContents(Settings->GetTempImportFolderPath());
+	// Validate raw settings before path normalization can hide ambiguous components.
+	TotalDeleted += DeleteDirectoryContents(Settings->TempExportPath.IsEmpty()
+		? TEXT("Saved/Atlas/TempExports") : Settings->TempExportPath);
+	TotalDeleted += DeleteDirectoryContents(Settings->TempImportPath.IsEmpty()
+		? TEXT("Saved/Atlas/TempImports") : Settings->TempImportPath);
 
 	if (TotalDeleted > 0)
 	{
@@ -98,37 +102,16 @@ int64 UAtlasTempStorageManager::GetDirectorySizeRecursive(const FString& Directo
 
 int32 UAtlasTempStorageManager::DeleteDirectoryContents(const FString& DirectoryPath)
 {
-	IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
-	if (!PlatformFile.DirectoryExists(*DirectoryPath))
+	const AtlasTempStorage::FContext Context{
+		FPaths::ProjectDir(), FPaths::ProjectSavedDir(), FPaths::EngineDir(),
+		UAtlasSDKSettings::Get()->GetOutputFolderPath() };
+	FString Error;
+	const int32 Deleted = AtlasTempStorage::CleanupDirectory(DirectoryPath, Context, Error);
+	if (!Error.IsEmpty())
 	{
-		return 0;
+		UE_LOG(LogTemp, Warning, TEXT("Atlas temp cleanup [%s]: %s"), *DirectoryPath, *Error);
 	}
-
-	int32 DeletedCount = 0;
-
-	TArray<FString> Files;
-	IFileManager::Get().FindFilesRecursive(Files, *DirectoryPath, TEXT("*"), true, false);
-
-	for (const FString& FilePath : Files)
-	{
-		if (PlatformFile.DeleteFile(*FilePath))
-		{
-			DeletedCount++;
-		}
-	}
-
-	// Clean up empty subdirectories
-	TArray<FString> Directories;
-	IFileManager::Get().FindFilesRecursive(Directories, *DirectoryPath, TEXT("*"), false, true);
-
-	// Delete deepest directories first
-	Directories.Sort([](const FString& A, const FString& B) { return A.Len() > B.Len(); });
-	for (const FString& Dir : Directories)
-	{
-		PlatformFile.DeleteDirectory(*Dir);
-	}
-
-	return DeletedCount;
+	return Deleted;
 }
 
 FString UAtlasTempStorageManager::FormatBytes(int64 Bytes)

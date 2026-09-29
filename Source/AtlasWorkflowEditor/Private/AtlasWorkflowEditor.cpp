@@ -1,6 +1,10 @@
 // AtlasWorkflowEditor.cpp
 
 #include "AtlasWorkflowEditor.h"
+#include "AtlasLibraryProfiler.h"
+#include "AtlasEditorSubsystem.h"
+#include "AtlasJobManager.h"
+#include "AtlasHistoryManager.h"
 #include "AtlasWorkflowAssetActions.h"
 #include "AssetToolsModule.h"
 #include "IAssetTools.h"
@@ -155,13 +159,22 @@ void FAtlasWorkflowEditorModule::BuildAtlasToolbarMenu(UToolMenu* Menu)
 
 void FAtlasWorkflowEditorModule::OpenEditorUtilityWidget(const FString& WidgetAssetPath)
 {
+	FAtlasLibraryProfileScope Profile(TEXT("Panel.Open"));
+	// Reopening is also an explicit external refresh, including roots that did not
+	// exist when directory watches were registered. Child/pure queries share one rebuild.
+	GEditor->GetEditorSubsystem<UAtlasEditorSubsystem>()->GetJobManager()->GetHistoryManager()->RefreshHistory();
 	const FSoftObjectPath WidgetPath(WidgetAssetPath);
-	UObject* LoadedObject = WidgetPath.TryLoad();
+	UObject* LoadedObject;
+	{
+		FAtlasLibraryProfileScope LoadProfile(TEXT("Panel.LoadAsset"));
+		LoadedObject = WidgetPath.TryLoad();
+	}
 
 	if (UEditorUtilityWidgetBlueprint* WidgetBlueprint = Cast<UEditorUtilityWidgetBlueprint>(LoadedObject))
 	{
 		if (UEditorUtilitySubsystem* Subsystem = GEditor->GetEditorSubsystem<UEditorUtilitySubsystem>())
 		{
+			FAtlasLibraryProfileScope SpawnProfile(TEXT("Panel.SpawnTab"));
 			Subsystem->SpawnAndRegisterTab(WidgetBlueprint);
 		}
 	}

@@ -376,7 +376,7 @@ bool UAtlasJsonObject::DecodeJson(const FString& JsonString)
 		return true;
 	}
 
-	UE_LOG(LogAtlasHTTP, Warning, TEXT("Failed to parse JSON string: %s"), *JsonString);
+	UE_LOG(LogAtlasHTTP, Warning, TEXT("Failed to parse JSON object (%d characters; body omitted)"), JsonString.Len());
 	return false;
 }
 

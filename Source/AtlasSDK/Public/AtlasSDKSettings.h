@@ -19,6 +19,7 @@ class ATLASSDK_API UAtlasSDKSettings : public UDeveloperSettings
 
 public:
 	UAtlasSDKSettings();
+	virtual void PostInitProperties() override;
 
 	// ==================== Output Folder Settings ====================
 
@@ -43,6 +44,8 @@ public:
 	 * Folder for temporary exports (e.g., when uploading assets to the server).
 	 * Relative paths are resolved from the project directory.
 	 * Default: {Project}/Saved/Atlas/TempExports/
+	 * Cleanup adopts empty folders only; existing unmarked data is preserved.
+	 * Protected project/output folders and linked or network paths cannot be cleaned.
 	 */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Output")
 	FString TempExportPath;
@@ -51,6 +54,8 @@ public:
 	 * Folder for temporary imports (e.g., downloaded files before processing).
 	 * Relative paths are resolved from the project directory.
 	 * Default: {Project}/Saved/Atlas/TempImports/
+	 * Cleanup adopts empty folders only; existing unmarked data is preserved.
+	 * Protected project/output folders and linked or network paths cannot be cleaned.
 	 */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Output")
 	FString TempImportPath;
@@ -65,8 +70,8 @@ public:
 	FDirectoryPath DefaultImportPath;
 
 	/**
-	 * When importing textures, automatically set these compression settings.
-	 * If empty, uses Unreal's default texture settings.
+	 * When enabled, use Unreal texture compression for imported textures.
+	 * When disabled, imported textures are uncompressed.
 	 */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category = "Import|Textures")
 	bool bCompressImportedTextures;
@@ -77,8 +82,24 @@ public:
 	 * Workspace API key for Atlas Platform v0.2+ (atk_...).
 	 * Create in Atlas → Workspace settings → API Keys.
 	 */
-	UPROPERTY(Config, EditAnywhere, Category = "Authentication", meta = (PasswordField = true))
+	UPROPERTY(Transient, meta = (DeprecatedProperty, DeprecationMessage = "Use Atlas Credentials (Local User) or ATLAS_API_KEY"))
 	FString WorkspaceApiKey;
+
+	/** Exact HTTPS origins permitted to receive workspace credentials. No wildcard hosts. */
+	UPROPERTY(Config, EditAnywhere, Category = "Authentication")
+	TArray<FString> TrustedApiOrigins;
+
+	/** Maximum retained downloaded bytes. Zero disables download caching. */
+	UPROPERTY(Config, EditAnywhere, Category = "Cache", meta = (ClampMin = "0"))
+	int32 MaxDownloadCacheMB = 128;
+	UPROPERTY(Config, EditAnywhere, Category = "Cache", meta = (ClampMin = "64", ClampMax = "2048"))
+	int32 MaxPreviewDimension = 512;
+	UPROPERTY(Config, EditAnywhere, Category = "Cache", meta = (ClampMin = "0"))
+	int32 MaxPreviewCacheMB = 32;
+
+	/** Opt-in display retention. Archives and generated files are never removed by this setting. */
+	UPROPERTY(Config, EditAnywhere, Category = "History")
+	bool bLimitVisibleHistory = false;
 
 	/**
 	 * When enabled and WorkspaceApiKey is empty, read ATLAS_API_KEY from the process environment.
@@ -150,8 +171,8 @@ public:
 	// ==================== History Settings ====================
 
 	/**
-	 * Maximum number of history records to keep per workflow.
-	 * Oldest records are automatically removed when limit is exceeded.
+	 * Maximum visible history records per workflow when bLimitVisibleHistory is enabled.
+	 * Older records are hidden, never deleted. ClearHistory includes hidden records.
 	 * Set to 0 for unlimited history.
 	 * Default: 100
 	 */

@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Containers/Ticker.h"
 #include "UObject/NoExportTypes.h"
 #include "Types/AtlasBatchTypes.h"
 #include "AtlasBatchPersistence.h"
@@ -39,6 +40,7 @@ class ATLASSDK_API UAtlasBatchOrchestrator : public UObject
 
 public:
 	UAtlasBatchOrchestrator();
+	virtual void BeginDestroy() override;
 
 	// ==================== Execution ====================
 
@@ -97,6 +99,12 @@ public:
 	FOnBatchFailed OnBatchFailed;
 
 private:
+#if WITH_DEV_AUTOMATION_TESTS
+	friend struct FAtlasCancellationTestAccess;
+	friend struct FAtlasSchedulingTestAccess;
+	TFunction<void(UAtlasJob*)> JobDispatcherForTests;
+	friend struct FAtlasLifetimeTestAccess;
+#endif
 	// ==================== Internal Methods ====================
 
 	/** Dispatch the next pending row(s) up to the concurrency limit */
@@ -111,6 +119,7 @@ private:
 
 	/** Schedule a retry for a row after backoff delay */
 	void ScheduleRetry(int32 RowIndex);
+	void ClearRetryTimers();
 
 	/** Called by timer to retry a specific row */
 	void RetryRow(int32 RowIndex);
@@ -143,6 +152,9 @@ private:
 
 	/** Whether cancellation has been requested */
 	bool bCancellationRequested = false;
+	bool bCancelling = false;
+	bool bDispatching = false;
+	TArray<int32> ReadyRetryRows;
 
 	/** The batch definition (rows are mutated with status updates) */
 	FAtlasBatchDefinition Batch;
@@ -171,5 +183,5 @@ private:
 	TMap<FGuid, int32> JobToRowMap;
 
 	/** Timer handles for retry backoff (RowIndex -> handle) */
-	TMap<int32, FTimerHandle> RetryTimerHandles;
+	TMap<int32, FTSTicker::FDelegateHandle> RetryTimerHandles;
 };

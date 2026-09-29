@@ -245,7 +245,7 @@ struct ATLASSDK_API FAtlasWorkflowOutputs
 	{
 		if (const FAtlasValue* Found = Values.Find(Name))
 		{
-			if (Found->IsFileId())
+			if ((Found->IsFileId() || Found->IsFileType()) && !Found->FileId.IsEmpty())
 			{
 				OutFileId = Found->GetFileId();
 				return true;

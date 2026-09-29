@@ -1,6 +1,12 @@
 // Copyright Atlas Platform. All Rights Reserved.
 
 #include "AtlasOutputManager.h"
+#include "AtlasFileWork.h"
+#include "Async/Async.h"
+#include "UObject/StrongObjectPtr.h"
+#include "ImageCore.h"
+#include "AtlasArchiveSafety.h"
+#include "AtlasLibraryProfiler.h"
 #include "AtlasSDKSettings.h"
 #include "AtlasJob.h"
 #include "Types/AtlasValueTypes.h"
@@ -25,6 +31,66 @@
 #include "Engine/StaticMesh.h"
 #include "Engine/Blueprint.h"
 #endif
+
+namespace
+{
+bool DecodeAtlasPreview(IImageWrapperModule& ImageWrapperModule, const TArray<uint8>& ImageBytes, int32 MaxDimension, TArray<uint8>& RawData, int32& Width, int32& Height)
+{
+
+	// Detect image format from bytes
+	EImageFormat ImageFormat = ImageWrapperModule.DetectImageFormat(ImageBytes.GetData(), ImageBytes.Num());
+	if (ImageFormat == EImageFormat::Invalid)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("AtlasOutputManager: Could not detect image format from bytes"));
+		return false;
+	}
+
+	// Create appropriate image wrapper
+	TSharedPtr<IImageWrapper> ImageWrapper = ImageWrapperModule.CreateImageWrapper(ImageFormat);
+	if (!ImageWrapper.IsValid())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("AtlasOutputManager: Failed to create image wrapper"));
+		return false;
+	}
+
+	// Decompress the image
+	if (!ImageWrapper->SetCompressed(ImageBytes.GetData(), ImageBytes.Num()))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("AtlasOutputManager: Failed to decompress image bytes"));
+		return false;
+	}
+
+	if (ImageWrapper->GetWidth() <= 0 || ImageWrapper->GetHeight() <= 0 || int64(ImageWrapper->GetWidth()) * ImageWrapper->GetHeight() > 64 * 1024 * 1024) return false;
+	// Get raw BGRA data
+	if (!ImageWrapper->GetRaw(ERGBFormat::BGRA, 8, RawData))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("AtlasOutputManager: Failed to get raw image data"));
+		return false;
+	}
+
+	Width = ImageWrapper->GetWidth();
+	Height = ImageWrapper->GetHeight();
+
+	if (Width <= 0 || Height <= 0)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("AtlasOutputManager: Invalid image dimensions: %dx%d"), Width, Height);
+		return false;
+	}
+
+	if (Width > MaxDimension || Height > MaxDimension)
+	{
+		const double Scale = double(MaxDimension) / FMath::Max(Width, Height);
+		const int32 NewWidth = FMath::Max(1, FMath::RoundToInt(Width * Scale));
+		const int32 NewHeight = FMath::Max(1, FMath::RoundToInt(Height * Scale));
+		TArray<uint8> Resized;
+		Resized.SetNumUninitialized(NewWidth * NewHeight * 4);
+		FImageCore::ResizeImage(FImageView(RawData.GetData(), Width, Height, 1, ERawImageFormat::BGRA8, EGammaSpace::sRGB),
+			FImageView(Resized.GetData(), NewWidth, NewHeight, 1, ERawImageFormat::BGRA8, EGammaSpace::sRGB));
+		RawData = MoveTemp(Resized); Width = NewWidth; Height = NewHeight;
+	}
+	return true;
+}
+}
 
 UAtlasOutputManager::UAtlasOutputManager()
 {
@@ -56,6 +122,7 @@ FAtlasSaveResult UAtlasOutputManager::SaveToOutputFolder(const TArray<uint8>& By
 	}
 
 	FString FullPath = FPaths::Combine(TargetFolder, FileName);
+	if (!AtlasArchive::IsContained(GetOutputFolder(), FullPath)) { FAtlasSaveResult Invalid; Invalid.ErrorMessage = TEXT("Unsafe archive destination"); return Invalid; }
 	return SaveBytesToPath(Bytes, FullPath);
 }
 
@@ -63,24 +130,28 @@ FAtlasSaveResult UAtlasOutputManager::SaveToOutputSubfolder(const TArray<uint8>&
 {
 	FString TargetFolder = FPaths::Combine(GetOutputFolder(), SubFolder);
 	FString FullPath = FPaths::Combine(TargetFolder, FileName);
+	if (!AtlasArchive::IsContained(GetOutputFolder(), FullPath)) { FAtlasSaveResult Invalid; Invalid.ErrorMessage = TEXT("Unsafe archive destination"); return Invalid; }
 	return SaveBytesToPath(Bytes, FullPath);
 }
 
 FAtlasSaveResult UAtlasOutputManager::SaveImageToOutputFolder(const TArray<uint8>& Bytes, const FString& FileName)
 {
 	FString FullPath = FPaths::Combine(GetImagesFolder(), FileName);
+	if (!AtlasArchive::IsContained(GetImagesFolder(), FullPath)) { FAtlasSaveResult Invalid; Invalid.ErrorMessage = TEXT("Unsafe archive destination"); return Invalid; }
 	return SaveBytesToPath(Bytes, FullPath);
 }
 
 FAtlasSaveResult UAtlasOutputManager::SaveMeshToOutputFolder(const TArray<uint8>& Bytes, const FString& FileName)
 {
 	FString FullPath = FPaths::Combine(GetMeshesFolder(), FileName);
+	if (!AtlasArchive::IsContained(GetMeshesFolder(), FullPath)) { FAtlasSaveResult Invalid; Invalid.ErrorMessage = TEXT("Unsafe archive destination"); return Invalid; }
 	return SaveBytesToPath(Bytes, FullPath);
 }
 
 FAtlasSaveResult UAtlasOutputManager::SaveAudioToOutputFolder(const TArray<uint8>& Bytes, const FString& FileName)
 {
 	FString FullPath = FPaths::Combine(GetAudioFolder(), FileName);
+	if (!AtlasArchive::IsContained(GetAudioFolder(), FullPath)) { FAtlasSaveResult Invalid; Invalid.ErrorMessage = TEXT("Unsafe archive destination"); return Invalid; }
 	return SaveBytesToPath(Bytes, FullPath);
 }
 
@@ -118,6 +189,7 @@ FAtlasSaveResult UAtlasOutputManager::SaveToJobOutputFolder(UAtlasJob* Job, cons
 	}
 	
 	FString FullPath = FPaths::Combine(FolderInfo.OutputsDiskPath, FileName);
+	if (!AtlasArchive::IsContained(FolderInfo.OutputsDiskPath, FullPath)) { FAtlasSaveResult Invalid; Invalid.ErrorMessage = TEXT("Unsafe archive destination"); return Invalid; }
 	UE_LOG(LogTemp, Log, TEXT("AtlasOutputManager: Saving output file to job outputs folder: %s"), *FullPath);
 	
 	return SaveBytesToPath(Bytes, FullPath);
@@ -240,13 +312,13 @@ FString UAtlasOutputManager::GetOutputFilePathForJobFromHistory(const FAtlasJobH
 
 	for (const FString& CandidatePath : CandidatePaths)
 	{
-		if (FPaths::FileExists(CandidatePath))
+		if (AtlasArchive::IsContained(GetOutputFolder(), CandidatePath) && FPaths::FileExists(CandidatePath))
 		{
 			return CandidatePath;
 		}
 	}
 
-	return CandidatePaths.Num() > 0 ? CandidatePaths[0] : FString();
+	return FString();
 }
 
 TArray<FString> UAtlasOutputManager::GetAllOutputFilesForJobFromHistory(const FAtlasJobHistoryRecord& HistoryRecord) const
@@ -262,7 +334,7 @@ TArray<FString> UAtlasOutputManager::GetAllOutputFilesForJobFromHistory(const FA
 
 	for (const auto& Pair : HistoryRecord.OutputFilePaths)
 	{
-		if (!Pair.Value.IsEmpty())
+		if (AtlasArchive::IsContained(GetOutputFolder(), Pair.Value))
 		{
 			UniquePaths.Add(Pair.Value);
 		}
@@ -271,7 +343,7 @@ TArray<FString> UAtlasOutputManager::GetAllOutputFilesForJobFromHistory(const FA
 	for (const auto& Pair : HistoryRecord.Outputs.Values)
 	{
 		const FAtlasValue& OutputValue = Pair.Value;
-		if (!OutputValue.FilePath.IsEmpty())
+		if (AtlasArchive::IsContained(GetOutputFolder(), OutputValue.FilePath))
 		{
 			UniquePaths.Add(OutputValue.FilePath);
 		}
@@ -322,7 +394,7 @@ FAtlasSaveResult UAtlasOutputManager::SaveBytesToPath(const TArray<uint8>& Bytes
 	}
 
 	// Save the file
-	if (FFileHelper::SaveArrayToFile(Bytes, *FullPath))
+	if (AtlasArchive::WriteBytes(FullPath, Bytes.GetData(), Bytes.Num()))
 	{
 		Result.bSuccess = true;
 		Result.FileSize = Bytes.Num();
@@ -477,55 +549,24 @@ EAtlasFileCategory UAtlasOutputManager::GetFileCategory(const FString& FileName)
 
 UTexture2D* UAtlasOutputManager::CreateTextureFromImageBytes(const TArray<uint8>& ImageBytes)
 {
+	FAtlasLibraryProfileScope Profile(TEXT("Preview.DecodeTexture"));
 	if (ImageBytes.Num() == 0)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("AtlasOutputManager: Cannot create texture from empty bytes"));
 		return nullptr;
 	}
 
-	// Get the image wrapper module
-	IImageWrapperModule& ImageWrapperModule = FModuleManager::LoadModuleChecked<IImageWrapperModule>(TEXT("ImageWrapper"));
-
-	// Detect image format from bytes
-	EImageFormat ImageFormat = ImageWrapperModule.DetectImageFormat(ImageBytes.GetData(), ImageBytes.Num());
-	if (ImageFormat == EImageFormat::Invalid)
+	const int32 MaxDimension = FMath::Clamp(UAtlasSDKSettings::Get()->MaxPreviewDimension, 64, 2048);
+	const FString CacheKey = FMD5::HashBytes(ImageBytes.GetData(), ImageBytes.Num()) + FString::FromInt(MaxDimension);
+	if (TObjectPtr<UTexture2D>* Cached = PreviewCache.Find(CacheKey))
 	{
-		UE_LOG(LogTemp, Warning, TEXT("AtlasOutputManager: Could not detect image format from bytes"));
-		return nullptr;
+		PreviewCacheOrder.Remove(CacheKey); PreviewCacheOrder.Add(CacheKey);
+		return Cached->Get();
 	}
-
-	// Create appropriate image wrapper
-	TSharedPtr<IImageWrapper> ImageWrapper = ImageWrapperModule.CreateImageWrapper(ImageFormat);
-	if (!ImageWrapper.IsValid())
-	{
-		UE_LOG(LogTemp, Warning, TEXT("AtlasOutputManager: Failed to create image wrapper"));
-		return nullptr;
-	}
-
-	// Decompress the image
-	if (!ImageWrapper->SetCompressed(ImageBytes.GetData(), ImageBytes.Num()))
-	{
-		UE_LOG(LogTemp, Warning, TEXT("AtlasOutputManager: Failed to decompress image bytes"));
-		return nullptr;
-	}
-
-	// Get raw BGRA data
+	IImageWrapperModule& Module = FModuleManager::LoadModuleChecked<IImageWrapperModule>(TEXT("ImageWrapper"));
 	TArray<uint8> RawData;
-	if (!ImageWrapper->GetRaw(ERGBFormat::BGRA, 8, RawData))
-	{
-		UE_LOG(LogTemp, Warning, TEXT("AtlasOutputManager: Failed to get raw image data"));
-		return nullptr;
-	}
-
-	int32 Width = ImageWrapper->GetWidth();
-	int32 Height = ImageWrapper->GetHeight();
-
-	if (Width <= 0 || Height <= 0)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("AtlasOutputManager: Invalid image dimensions: %dx%d"), Width, Height);
-		return nullptr;
-	}
-
+	int32 Width = 0, Height = 0;
+	if (!DecodeAtlasPreview(Module, ImageBytes, MaxDimension, RawData, Width, Height)) return nullptr;
 	// Create a transient texture (not saved to disk)
 	UTexture2D* Texture = UTexture2D::CreateTransient(Width, Height, PF_B8G8R8A8);
 	if (!Texture)
@@ -550,17 +591,24 @@ UTexture2D* UAtlasOutputManager::CreateTextureFromImageBytes(const TArray<uint8>
 
 	UE_LOG(LogTemp, Log, TEXT("AtlasOutputManager: Created transient texture %dx%d from bytes"), Width, Height);
 
+	CachePreview(CacheKey, Texture);
 	return Texture;
 }
 
 UTexture2D* UAtlasOutputManager::LoadTextureFromFile(const FString& FilePath)
 {
+	FAtlasLibraryProfileScope Profile(TEXT("Preview.LoadTexture"));
 	if (!FPaths::FileExists(FilePath))
 	{
 		UE_LOG(LogTemp, Warning, TEXT("AtlasOutputManager: File not found: %s"), *FilePath);
 		return nullptr;
 	}
 
+	const FString Stamp = FPaths::ConvertRelativePathToFull(FilePath) + TEXT("|")
+		+ IFileManager::Get().GetTimeStamp(*FilePath).ToIso8601() + TEXT("|")
+		+ LexToString(IFileManager::Get().FileSize(*FilePath)) + TEXT("|") + FString::FromInt(UAtlasSDKSettings::Get()->MaxPreviewDimension);
+	if (const FString* Key = PreviewFiles.Find(Stamp))
+		if (const TObjectPtr<UTexture2D>* Cached = PreviewCache.Find(*Key)) return Cached->Get();
 	// Load file to bytes
 	TArray<uint8> FileBytes;
 	if (!FFileHelper::LoadFileToArray(FileBytes, *FilePath))
@@ -572,7 +620,13 @@ UTexture2D* UAtlasOutputManager::LoadTextureFromFile(const FString& FilePath)
 	UE_LOG(LogTemp, Log, TEXT("AtlasOutputManager: Loading texture from file: %s (%d bytes)"), *FilePath, FileBytes.Num());
 
 	// Use the bytes-based method
-	return CreateTextureFromImageBytes(FileBytes);
+	UTexture2D* Texture = CreateTextureFromImageBytes(FileBytes);
+	if (Texture)
+	{
+		if (PreviewFiles.Num() >= 256) PreviewFiles.Empty();
+		PreviewFiles.Add(Stamp, FMD5::HashBytes(FileBytes.GetData(), FileBytes.Num()) + FString::FromInt(FMath::Clamp(UAtlasSDKSettings::Get()->MaxPreviewDimension, 64, 2048)));
+	}
+	return Texture;
 }
 
 // ==================== Job-Based Path Helpers (Non-Editor) ====================
@@ -600,7 +654,7 @@ FString UAtlasOutputManager::GenerateJobFolderName(const FDateTime& StartedAt, c
 		StartedAt.GetMinute(),
 		StartedAt.GetSecond());
 	
-	FString ShortId = GenerateShortId(JobId);
+	FString ShortId = JobId.ToString(EGuidFormats::DigitsLower);
 	
 	return FString::Printf(TEXT("%s_%s_%s"), *DatePart, *TimePart, *ShortId);
 }
@@ -648,6 +702,10 @@ FString UAtlasOutputManager::SanitizeWorkflowName(const FString& WorkflowName)
 		return TEXT("UnknownWorkflow");
 	}
 	
+	const FString DeviceName = FPaths::GetBaseFilename(Sanitized).ToUpper();
+	if (DeviceName == TEXT("CON") || DeviceName == TEXT("PRN") || DeviceName == TEXT("AUX") || DeviceName == TEXT("NUL")
+		|| DeviceName.StartsWith(TEXT("COM")) || DeviceName.StartsWith(TEXT("LPT")) || Sanitized.Len() > 80) return AtlasArchive::Component(WorkflowName);
+	if (Sanitized.Contains(TEXT("..")) || Sanitized.EndsWith(TEXT(".")) || Sanitized.EndsWith(TEXT(" "))) return AtlasArchive::Component(WorkflowName);
 	return Sanitized;
 }
 
@@ -736,6 +794,9 @@ FAtlasJobFolderInfo UAtlasOutputManager::GetJobFolderInfoFromHistory(const FAtla
 	
 	// Generate job folder name using StartedAt
 	Info.JobFolderName = GenerateJobFolderName(HistoryRecord.StartedAt, HistoryRecord.JobId);
+	const FString LegacyName = Info.JobFolderName.LeftChop(32) + GenerateShortId(HistoryRecord.JobId);
+	if (HistoryRecord.JobFolderPath.IsEmpty() && FPaths::DirectoryExists(GetOutputFolder() / Info.WorkflowName / LegacyName))
+		Info.JobFolderName = LegacyName;
 	
 	// Build Content Browser path: {DefaultImportPath}/{WorkflowName}/{JobFolder}
 	const UAtlasSDKSettings* Settings = UAtlasSDKSettings::Get();
@@ -782,6 +843,8 @@ FAtlasJobFolderInfo UAtlasOutputManager::GetJobFolderInfoFromHistory(const FAtla
 
 	Info.ContentBrowserPath = FPaths::Combine(BasePath, Info.WorkflowName, Info.JobFolderName);
 	
+	if (!AtlasArchive::IsContained(OutputBase, Info.DiskPath) || !AtlasArchive::IsContained(Info.DiskPath, Info.InputsDiskPath)
+		|| !AtlasArchive::IsContained(Info.DiskPath, Info.OutputsDiskPath) || !AtlasArchive::IsContained(Info.DiskPath, Info.JobJsonPath)) return FAtlasJobFolderInfo();
 	return Info;
 }
 
@@ -857,6 +920,7 @@ FAtlasImportResult UAtlasOutputManager::ImportTextureAsset(const FString& FilePa
 
 	// Create the texture factory
 	UTextureFactory* TextureFactory = NewObject<UTextureFactory>();
+	TextureFactory->NoCompression = !UAtlasSDKSettings::Get()->bCompressImportedTextures;
 	TextureFactory->AddToRoot(); // Prevent GC during import
 
 	// Note: We do NOT call SuppressImportOverwriteDialog()
@@ -1792,3 +1856,55 @@ TArray<UObject*> UAtlasOutputManager::GetAllImportedAssetsForJobFromHistory(cons
 }
 
 #endif // WITH_EDITOR
+
+void UAtlasOutputManager::CachePreview(const FString& Key, UTexture2D* Texture)
+{
+	const int64 Budget = int64(FMath::Max(0, UAtlasSDKSettings::Get()->MaxPreviewCacheMB)) * 1024 * 1024;
+	PreviewCache.Add(Key, Texture);
+	PreviewCacheOrder.Remove(Key); PreviewCacheOrder.Add(Key);
+	int64 Bytes = 0;
+	for (const auto& Pair : PreviewCache) if (Pair.Value) Bytes += int64(Pair.Value->GetSizeX()) * Pair.Value->GetSizeY() * 4;
+	while (Bytes > Budget && !PreviewCacheOrder.IsEmpty())
+	{
+		const FString Oldest = PreviewCacheOrder[0]; PreviewCacheOrder.RemoveAt(0);
+		if (const TObjectPtr<UTexture2D>* Old = PreviewCache.Find(Oldest))
+			if (*Old) Bytes -= int64((*Old)->GetSizeX()) * (*Old)->GetSizeY() * 4;
+		PreviewCache.Remove(Oldest);
+	}
+}
+
+void UAtlasOutputManager::LoadPreviewAsync(const FString& FilePath, TFunction<void(UTexture2D*)> OnLoaded)
+{
+	check(IsInGameThread());
+	const int32 Limit = FMath::Clamp(UAtlasSDKSettings::Get()->MaxPreviewDimension, 64, 2048);
+	const FString Stamp = FPaths::ConvertRelativePathToFull(FilePath) + TEXT("|")
+		+ IFileManager::Get().GetTimeStamp(*FilePath).ToIso8601() + TEXT("|")
+		+ LexToString(IFileManager::Get().FileSize(*FilePath)) + TEXT("|") + FString::FromInt(Limit);
+	if (const auto* Cached = PreviewCache.Find(Stamp)) { OnLoaded(Cached->Get()); return; }
+	IImageWrapperModule* Module = &FModuleManager::LoadModuleChecked<IImageWrapperModule>(TEXT("ImageWrapper"));
+	TWeakObjectPtr<UAtlasOutputManager> WeakThis(this);
+	AtlasFileWork::Enqueue([WeakThis, FilePath, Stamp, Limit, Module, OnLoaded = MoveTemp(OnLoaded)]() mutable
+	{
+		TArray<uint8> Bytes, Pixels;
+		int32 Width = 0, Height = 0;
+		const int64 Size = IFileManager::Get().FileSize(*FilePath);
+		const bool bLoaded = Size > 0 && Size <= 256 * 1024 * 1024 && FFileHelper::LoadFileToArray(Bytes, *FilePath)
+			&& DecodeAtlasPreview(*Module, Bytes, Limit, Pixels, Width, Height);
+		Bytes.Empty();
+		AsyncTask(ENamedThreads::GameThread, [WeakThis, Stamp, bLoaded, Width, Height, Pixels = MoveTemp(Pixels), OnLoaded = MoveTemp(OnLoaded)]() mutable
+		{
+			TStrongObjectPtr<UAtlasOutputManager> Manager(WeakThis.Get());
+			if (!Manager.IsValid()) return;
+			UTexture2D* Texture = bLoaded ? UTexture2D::CreateTransient(Width, Height, PF_B8G8R8A8) : nullptr;
+			if (Texture)
+			{
+				void* Data = Texture->GetPlatformData()->Mips[0].BulkData.Lock(LOCK_READ_WRITE);
+				FMemory::Memcpy(Data, Pixels.GetData(), Pixels.Num());
+				Texture->GetPlatformData()->Mips[0].BulkData.Unlock();
+				Texture->UpdateResource();
+				Manager->CachePreview(Stamp, Texture);
+			}
+			OnLoaded(Texture);
+		});
+	});
+}

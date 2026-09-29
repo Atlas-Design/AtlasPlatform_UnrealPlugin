@@ -66,6 +66,8 @@ public:
 
 	/**
 	 * Export a texture to PNG format.
+	 * Prefers source art. Without source art, only validated BGRA8, G8, or RGBA16F CPU mips are supported.
+	 * PNG export converts HDR source values to the encoder's PNG representation; use an HDR format to retain HDR range.
 	 * @param Texture The texture to export
 	 * @param OutputPath Optional specific output path (uses temp folder if empty)
 	 * @return Export result

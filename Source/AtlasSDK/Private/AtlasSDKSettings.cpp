@@ -1,6 +1,11 @@
 // Copyright Atlas Platform. All Rights Reserved.
 
 #include "AtlasSDKSettings.h"
+#include "AtlasCredentialSettings.h"
+#include "AtlasRuntimeSettings.h"
+#include "Misc/ConfigCacheIni.h"
+#include "UObject/StrongObjectPtr.h"
+#include "UObject/UnrealType.h"
 #include "AtlasPlatformAuth.h"
 #include "Misc/Paths.h"
 #include "GenericPlatform/GenericPlatformMisc.h"
@@ -25,6 +30,7 @@ UAtlasSDKSettings::UAtlasSDKSettings()
 
 	// Authentication (v0.2+)
 	WorkspaceApiKey.Empty();
+	TrustedApiOrigins = { TEXT("https://api.dev.atlas.design"), TEXT("https://api.prod.atlas.design") };
 	bReadApiKeyFromEnvironment = true;
 
 	// Execution settings
@@ -90,7 +96,9 @@ FString UAtlasSDKSettings::GetTempExportFolderPath() const
 	const FString RelativePath = !TempExportPath.IsEmpty() 
 		? TempExportPath 
 		: TEXT("Saved/Atlas/TempExports");
-	return FPaths::Combine(FPaths::ProjectDir(), RelativePath);
+	FString Resolved = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir(), RelativePath);
+	FPaths::NormalizeDirectoryName(Resolved);
+	return Resolved;
 }
 
 FString UAtlasSDKSettings::GetTempImportFolderPath() const
@@ -98,17 +106,44 @@ FString UAtlasSDKSettings::GetTempImportFolderPath() const
 	const FString RelativePath = !TempImportPath.IsEmpty() 
 		? TempImportPath 
 		: TEXT("Saved/Atlas/TempImports");
-	return FPaths::Combine(FPaths::ProjectDir(), RelativePath);
+	FString Resolved = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir(), RelativePath);
+	FPaths::NormalizeDirectoryName(Resolved);
+	return Resolved;
 }
 
 const UAtlasSDKSettings* UAtlasSDKSettings::Get()
 {
-	return GetDefault<UAtlasSDKSettings>();
+	UAtlasSDKSettings* Settings = GetMutableDefault<UAtlasSDKSettings>();
+	const UAtlasRuntimeSettings* Runtime = GetDefault<UAtlasRuntimeSettings>();
+	if (Runtime->bUseRuntimeOverrides)
+	{
+		// Do not mutate the legacy CDO: disabling overrides must restore its existing preferences.
+		static TStrongObjectPtr<UAtlasSDKSettings> Effective(NewObject<UAtlasSDKSettings>());
+		for (TFieldIterator<FProperty> It(UAtlasSDKSettings::StaticClass()); It; ++It)
+			if (It->HasAnyPropertyFlags(CPF_Config)) It->CopyCompleteValue_InContainer(Effective.Get(), Settings);
+		Effective->WorkspaceApiKey = Settings->WorkspaceApiKey;
+		Settings = Effective.Get();
+		Settings->RequestTimeoutSeconds = Runtime->RequestTimeoutSeconds;
+		Settings->StatusPollIntervalSeconds = Runtime->StatusPollIntervalSeconds;
+		Settings->MaxExecutionTimeSeconds = Runtime->MaxExecutionTimeSeconds;
+		Settings->bEnableUploadCache = Runtime->bEnableUploadCache;
+		Settings->MaxUploadCacheEntries = Runtime->MaxUploadCacheEntries;
+		Settings->CacheMaxAgeHours = Runtime->CacheMaxAgeHours;
+		Settings->MaxDownloadCacheMB = Runtime->MaxDownloadCacheMB;
+		Settings->MaxPreviewDimension = Runtime->MaxPreviewDimension;
+		Settings->MaxPreviewCacheMB = Runtime->MaxPreviewCacheMB;
+		Settings->TrustedApiOrigins = Runtime->TrustedApiOrigins;
+	}
+	return Settings;
 }
 
 FString UAtlasSDKSettings::GetResolvedWorkspaceApiKey() const
 {
-	FString Key = WorkspaceApiKey;
+	FString Key;
+#if WITH_EDITOR
+	Key = GetDefault<UAtlasCredentialSettings>()->WorkspaceApiKey;
+	if (Key.IsEmpty()) Key = WorkspaceApiKey; // Read-only migration fallback; never saved back to shared defaults.
+#endif
 	Key.TrimStartAndEndInline();
 	if (!Key.IsEmpty())
 	{
@@ -140,4 +175,14 @@ FString UAtlasSDKSettings::GetAtlasDefaultImportFolder()
 {
 	const UAtlasSDKSettings* Settings = Get();
 	return Settings ? Settings->GetTempImportFolderPath() : FPaths::Combine(FPaths::ProjectDir(), TEXT("Saved/Atlas/TempImports"));
+}
+
+void UAtlasSDKSettings::PostInitProperties()
+{
+	Super::PostInitProperties();
+#if WITH_EDITOR
+	// Preserve existing installations without rewriting or copying their secret files.
+	if (HasAnyFlags(RF_ClassDefaultObject) && GConfig)
+		GConfig->GetString(TEXT("/Script/AtlasSDK.AtlasSDKSettings"), TEXT("WorkspaceApiKey"), WorkspaceApiKey, GEditorPerProjectIni);
+#endif
 }
