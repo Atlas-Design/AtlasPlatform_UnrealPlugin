@@ -53,6 +53,10 @@
 		{
 			"Name": "InterchangeEditor",
 			"Enabled": true
+		},
+		{
+			"Name": "GLTFExporter",
+			"Enabled": true
 		}
 	]
 }

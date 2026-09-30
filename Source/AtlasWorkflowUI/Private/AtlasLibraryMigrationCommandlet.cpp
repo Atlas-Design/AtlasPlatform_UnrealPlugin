@@ -46,7 +46,7 @@ int32 UAtlasLibraryMigrationCommandlet::Main(const FString& Params)
 			UEdGraphPin* Source = Input->LinkedTo[0];
 			if (UK2Node_CallFunction* Existing = Cast<UK2Node_CallFunction>(Source->GetOwningNode()))
 				if (Existing->GetFunctionName() == TEXT("ResolveWorkflowDisplayAsset")) { ++SelectionCount; continue; }
-			UK2Node_CallFunction* Resolve = NewObject<UK2Node_CallFunction>(Graph);
+			UK2Node_CallFunction* Resolve = NewObject<UK2Node_CallFunction>(Graph, NAME_None, RF_Transactional);
 			Graph->AddNode(Resolve, false, false);
 			Resolve->CreateNewGuid();
 			Resolve->SetFromFunction(UAtlasUIHelpers::StaticClass()->FindFunctionByName(TEXT("ResolveWorkflowDisplayAsset")));
@@ -89,7 +89,7 @@ int32 UAtlasLibraryMigrationCommandlet::Main(const FString& Params)
 			if (!Texture || Texture->LinkedTo.Num() != 1) return 10;
 			UK2Node_CallFunction* Brush = Cast<UK2Node_CallFunction>(Texture->LinkedTo[0]->GetOwningNode());
 			if (!Brush || Brush->GetFunctionName() != TEXT("SetBrushFromTexture")) return 11;
-			UK2Node_CallFunction* Async = NewObject<UK2Node_CallFunction>(Graph);
+			UK2Node_CallFunction* Async = NewObject<UK2Node_CallFunction>(Graph, NAME_None, RF_Transactional);
 			Graph->AddNode(Async, false, false); Async->CreateNewGuid();
 			Async->SetFromFunction(UAtlasUIHelpers::StaticClass()->FindFunctionByName(TEXT("LoadPreviewIntoImage")));
 			Async->AllocateDefaultPins(); Async->NodePosX = Load->NodePosX; Async->NodePosY = Load->NodePosY;

@@ -18,6 +18,7 @@ public class AtlasWorkflowUI : ModuleRules
 				"Slate",
 				"SlateCore",
 				"AtlasSDK",
+                "Blutility",
 			}
 		);
 
@@ -25,6 +26,10 @@ public class AtlasWorkflowUI : ModuleRules
 			new string[]
 			{
 				"UnrealEd",
+				"UMGEditor",
+                "ScriptableEditorWidgets",
+                "GLTFExporter",
+				"Json",
 				"BlueprintGraph",
 				"KismetCompiler",
 				"Kismet",
