@@ -1,0 +1,22 @@
+{
+  "version": "0.2",
+  "api_id": "b05ea060-e50d-4e5d-b92f-237eed2b7d30",
+  "base_url": "https://api.dev.atlas.design",
+  "name": "AgentCreated | Plugin IO Test | API | 06 Mesh to Mesh | v001",
+  "inputs": [
+    {
+      "id": "mesh_input",
+      "label": "mesh_input",
+      "type": "mesh",
+      "required": true,
+      "default_value": null
+    }
+  ],
+  "outputs": [
+    {
+      "id": "mesh_output",
+      "type": "mesh",
+      "format": "glb"
+    }
+  ]
+}

@@ -463,6 +463,8 @@ protected:
 
 private:
 #if WITH_DEV_AUTOMATION_TESTS
+	friend struct FAtlasArrayTestAccess;
+    TFunction<FGuid(const FString&, const FGuid&)> DownloadDispatcherForTests;
 	friend struct FAtlasNonBatchTestAccess;
 	friend struct FAtlasCancellationTestAccess;
 	friend struct FAtlasSchedulingTestAccess;
@@ -526,13 +528,13 @@ private:
 	/** Prevent synchronous completions from advancing the pipeline during dispatch. */
 	bool bStartingUploads = false;
 
-	/** Files that need uploading: InputName -> FilePath */
+	/** Files that need uploading: transfer key -> FilePath (UploadTargets resolves parameter/item) */
 	TMap<FString, FString> FilesToUpload;
 
-	/** Upload operation IDs: OperationId -> InputName */
+	/** Upload operation IDs: OperationId -> transfer key */
 	TMap<FGuid, FString> UploadOperations;
 
-	/** Uploaded file IDs: InputName -> FileId */
+	/** Uploaded file IDs: transfer key -> FileId */
 	TMap<FString, FString> UploadedFileIds;
 
 	/** Number of uploads completed (success or fail) */
@@ -541,13 +543,23 @@ private:
 	/** Number of upload failures */
 	int32 UploadFailures;
 
-	bool bStartingDownloads = false;
+    struct FFileTarget { FString Parameter; int32 Index=INDEX_NONE; };
+    TMap<FString, FFileTarget> UploadTargets, DownloadTargets;
+    TArray<FString> DownloadQueue;
+    int32 NextDownload=0;
+    int32 PendingArrayWrites=0;
+    int64 RetainedArrayBytes=0;
+    void PumpDownloads();
+    void ArchiveArrayDownload(const FString& Key);
+    void RetainArrayBytes(FAtlasFileReference& Item, const FString& Label);
+    FString DownloadLabel(const FString& Key) const;
+    bool bStartingDownloads = false;
 	// ==================== Download Tracking ====================
 
-	/** Files that need downloading: OutputName -> FileId */
+	/** Files that need downloading: transfer key -> FileId (DownloadTargets resolves parameter/item) */
 	TMap<FString, FString> FilesToDownload;
 
-	/** Download operation IDs: OperationId -> OutputName */
+	/** Download operation IDs: OperationId -> transfer key */
 	TMap<FGuid, FString> DownloadOperations;
 
 	/** Downloaded file data: OutputName -> FileData */

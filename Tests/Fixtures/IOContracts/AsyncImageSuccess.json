@@ -1,0 +1,16 @@
+{
+  "http_status": 200,
+  "response": {
+    "status": "completed",
+    "result": {
+      "outputs": {
+        "image_output": "a439f5b9-9b37-4a52-8d9d-441c142291c5"
+      },
+      "success": true
+    },
+    "mode": "async",
+    "created_at": 1790759524.008154,
+    "started_at": 1790759524.1131594,
+    "completed_at": 1790759527.8148093
+  }
+}

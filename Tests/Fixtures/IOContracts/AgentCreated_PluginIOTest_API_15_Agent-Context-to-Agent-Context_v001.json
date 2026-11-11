@@ -1,0 +1,22 @@
+{
+  "version": "0.2",
+  "api_id": "c72fa83f-e847-42ff-b776-637342b92578",
+  "base_url": "https://api.dev.atlas.design",
+  "name": "AgentCreated | Plugin IO Test | API | 15 Agent Context to Agent Context | v001",
+  "inputs": [
+    {
+      "id": "conversation_input",
+      "label": "conversation_input",
+      "type": "agent_context",
+      "required": true,
+      "default_value": null
+    }
+  ],
+  "outputs": [
+    {
+      "id": "conversation_output",
+      "type": "agent_context",
+      "format": "atlas-context.json"
+    }
+  ]
+}

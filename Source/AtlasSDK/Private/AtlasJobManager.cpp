@@ -440,8 +440,9 @@ UAtlasJob* UAtlasJobManager::RerunFromHistory(const FAtlasJobHistoryRecord& Reco
 	}
 
 	FAtlasWorkflowInputs RestoredInputs = Record.Inputs;
+    for (auto It=RestoredInputs.Values.CreateIterator(); It; ++It) if (It.Value().bOmitted) It.RemoveCurrent();
 	for (auto& Pair : RestoredInputs.Values)
-		if (!Pair.Value.FilePath.IsEmpty() && !AtlasArchive::IsContained(UAtlasSDKSettings::Get()->GetOutputFolderPath(), Pair.Value.FilePath)) Pair.Value.FilePath.Empty();
+		Pair.Value.ForEachFile([](auto& Item, int32) { if (!Item.FilePath.IsEmpty() && !AtlasArchive::IsContained(UAtlasSDKSettings::Get()->GetOutputFolderPath(), Item.FilePath)) Item.FilePath.Empty(); });
 	// Try to find the workflow asset for this ApiId
 	UAtlasWorkflowAsset* FoundAsset = UAtlasWorkflowAsset::FindWorkflowByApiId(Record.ApiId);
 

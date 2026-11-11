@@ -1,0 +1,21 @@
+{
+  "version": "0.2",
+  "api_id": "1d14fa62-67b4-4304-90e9-f11ecfaa1159",
+  "base_url": "https://api.dev.atlas.design",
+  "name": "AgentCreated | Plugin IO Test | API | 03 Text to Text | v001",
+  "inputs": [
+    {
+      "id": "text_input",
+      "label": "text_input",
+      "type": "string",
+      "required": true,
+      "default_value": "Hello from Redcap's garden!"
+    }
+  ],
+  "outputs": [
+    {
+      "id": "text_output",
+      "type": "string"
+    }
+  ]
+}

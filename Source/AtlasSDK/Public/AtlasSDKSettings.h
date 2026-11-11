@@ -92,6 +92,12 @@ public:
 	/** Maximum retained downloaded bytes. Zero disables download caching. */
 	UPROPERTY(Config, EditAnywhere, Category = "Cache", meta = (ClampMin = "0"))
 	int32 MaxDownloadCacheMB = 128;
+    /** Per-job download/write slots. Array results are archived as each item arrives. */
+    UPROPERTY(Config, EditAnywhere, Category="Files", meta=(ClampMin="1", ClampMax="16"))
+    int32 MaxConcurrentOutputDownloads = 4;
+    /** Per-job array bytes kept when auto-save is off or fails. Beyond this limit only IDs/warnings remain. */
+    UPROPERTY(Config, EditAnywhere, Category="Files", meta=(ClampMin="0"))
+    int32 MaxRetainedArrayOutputMB = 128;
 	UPROPERTY(Config, EditAnywhere, Category = "Cache", meta = (ClampMin = "64", ClampMax = "2048"))
 	int32 MaxPreviewDimension = 512;
 	UPROPERTY(Config, EditAnywhere, Category = "Cache", meta = (ClampMin = "0"))

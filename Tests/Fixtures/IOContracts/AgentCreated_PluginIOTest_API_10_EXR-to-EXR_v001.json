@@ -1,0 +1,22 @@
+{
+  "version": "0.2",
+  "api_id": "a96a6c0a-ca45-4a76-b68e-cdfedaf6b085",
+  "base_url": "https://api.dev.atlas.design",
+  "name": "AgentCreated | Plugin IO Test | API | 10 EXR to EXR | v001",
+  "inputs": [
+    {
+      "id": "exr_input",
+      "label": "exr_input",
+      "type": "exr",
+      "required": true,
+      "default_value": null
+    }
+  ],
+  "outputs": [
+    {
+      "id": "exr_output",
+      "type": "exr",
+      "format": "exr"
+    }
+  ]
+}

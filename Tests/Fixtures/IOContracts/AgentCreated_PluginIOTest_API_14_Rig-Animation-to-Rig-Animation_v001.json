@@ -1,0 +1,22 @@
+{
+  "version": "0.2",
+  "api_id": "a3b11c06-1691-4752-8ede-81aec477a360",
+  "base_url": "https://api.dev.atlas.design",
+  "name": "AgentCreated | Plugin IO Test | API | 14 Rig Animation to Rig Animation | v001",
+  "inputs": [
+    {
+      "id": "animation_input",
+      "label": "animation_input",
+      "type": "rig_animation",
+      "required": true,
+      "default_value": null
+    }
+  ],
+  "outputs": [
+    {
+      "id": "animation_output",
+      "type": "rig_animation",
+      "format": "glb"
+    }
+  ]
+}

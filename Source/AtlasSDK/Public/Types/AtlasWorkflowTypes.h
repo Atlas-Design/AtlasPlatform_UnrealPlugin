@@ -21,7 +21,10 @@ struct ATLASSDK_API FAtlasWorkflowInputs
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Atlas|Inputs")
 	TMap<FString, FAtlasValue> Values;
 
-	// ==================== Setters (C++) ====================
+	void SetFileList(const FString& Name, EAtlasValueType Type, const TArray<FAtlasFileReference>& Items)
+    { Values.Add(Name, FAtlasValue::MakeFileList(Type, Items)); }
+
+    // ==================== Setters (C++) ====================
 
 	/** Set a string input value */
 	void SetString(const FString& Name, const FString& Value)
@@ -149,7 +152,14 @@ struct ATLASSDK_API FAtlasWorkflowOutputs
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Atlas|Outputs")
 	TMap<FString, FAtlasValue> Values;
 
-	// ==================== Value Access (C++) ====================
+	bool GetFileList(const FString& Name, TArray<FAtlasFileReference>& Items) const
+    {
+        const FAtlasValue* Value=Values.Find(Name);
+        if (!Value || !Value->bIsArray) return false;
+        Items=Value->FileItems; return true;
+    }
+
+    // ==================== Value Access (C++) ====================
 
 	/** Check if an output with the given name exists */
 	bool Contains(const FString& Name) const

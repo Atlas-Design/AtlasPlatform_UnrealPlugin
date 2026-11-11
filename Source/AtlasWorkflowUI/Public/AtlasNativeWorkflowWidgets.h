@@ -6,6 +6,7 @@
 #include "Types/AtlasHistoryTypes.h"
 #include "AtlasNativeWorkflowWidgets.generated.h"
 
+class UAtlasFilePanel;
 class UAtlasWorkflowAsset;
 class UAtlasInputFieldWidget;
 class UAtlasOutputManager;
@@ -29,6 +30,9 @@ class ATLASWORKFLOWUI_API UAtlasParameterRowWidget : public UEditorUtilityWidget
     GENERATED_BODY()
 public:
     UAtlasParameterRowWidget();
+    UPROPERTY(meta=(BindWidgetOptional)) TObjectPtr<UAtlasFilePanel> FilePresentation;
+    UPROPERTY(meta=(BindWidgetOptional)) TObjectPtr<UTextBlock> RecordedScalar;
+
     UPROPERTY(BlueprintReadOnly, Category="Atlas|Parameter") FAtlasValue Value;
     UPROPERTY(BlueprintReadOnly, Category="Atlas|Parameter") FString ParameterName;
     UPROPERTY(BlueprintReadOnly, Category="Atlas|Parameter") bool bEditable = false;
@@ -45,9 +49,19 @@ public:
     UFUNCTION(BlueprintCallable, Category="Atlas|Parameter") void PresentAudio(UObject* InObject);
     UFUNCTION(BlueprintCallable, Category="Atlas|Parameter") void PresentProperty(UObject* InObject, USinglePropertyView* InPropertyWidget, FName InPropertyName);
     UFUNCTION(BlueprintImplementableEvent, Category="Atlas|Appearance") void OnParameterPresentationChanged();
+    UFUNCTION(BlueprintPure, Category="Atlas|Parameter") bool CanImportOutput() const;
+    UFUNCTION(BlueprintPure, Category="Atlas|Parameter") FString GetLocalOutputPath() const;
+    UFUNCTION(BlueprintCallable, Category="Atlas|Parameter") bool SaveOutputCopy(const FString& Destination);
+    UFUNCTION(BlueprintCallable, Category="Atlas|Parameter") void RevealOutput();
+    UFUNCTION(BlueprintCallable, Category="Atlas|Parameter") void CopyAssetId();
+    UFUNCTION(BlueprintCallable, Category="Atlas|Parameter") void SaveOutputAs();
 protected:
     virtual void NativeConstruct() override;
     virtual void NativeDestruct() override;
+    UPROPERTY(meta=(BindWidgetOptional)) TObjectPtr<UWidget> FileActions;
+    UPROPERTY(meta=(BindWidgetOptional)) TObjectPtr<UButton> ButtonRevealOutput;
+    UPROPERTY(meta=(BindWidgetOptional)) TObjectPtr<UButton> ButtonSaveOutput;
+    UPROPERTY(meta=(BindWidgetOptional)) TObjectPtr<UButton> ButtonCopyAssetId;
     UPROPERTY(meta=(BindWidget)) TObjectPtr<UTextBlock> Text_ParamName;
     UPROPERTY(meta=(BindWidget)) TObjectPtr<UImage> StatusDot;
     UPROPERTY(meta=(BindWidget)) TObjectPtr<UImage> ImagePReview;

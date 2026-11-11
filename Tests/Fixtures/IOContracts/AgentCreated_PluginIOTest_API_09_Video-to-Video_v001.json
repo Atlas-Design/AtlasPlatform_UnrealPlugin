@@ -1,0 +1,22 @@
+{
+  "version": "0.2",
+  "api_id": "b7d9107a-840b-4754-bfe4-031244ceddb7",
+  "base_url": "https://api.dev.atlas.design",
+  "name": "AgentCreated | Plugin IO Test | API | 09 Video to Video | v001",
+  "inputs": [
+    {
+      "id": "video_input",
+      "label": "video_input",
+      "type": "video",
+      "required": true,
+      "default_value": null
+    }
+  ],
+  "outputs": [
+    {
+      "id": "video_output",
+      "type": "video",
+      "format": "mp4"
+    }
+  ]
+}

@@ -557,6 +557,11 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Atlas|Output|Import", meta = (CallInEditor = "true"))
 	FAtlasImportResult ImportJobOutputFromHistory(const FAtlasJobHistoryRecord& HistoryRecord, const FString& OutputName);
+    FAtlasImportResult ImportOutputItem(const FAtlasJobHistoryRecord& Record,const FString& Name,int32 Index);
+    FAtlasImportResult FindImportedOutputItem(const FAtlasJobHistoryRecord& Record,const FString& Name,int32 Index,bool bLoadAsset=true) const;
+    FString GetOutputItemPath(const FAtlasJobHistoryRecord& Record,const FString& Name,int32 Index) const;
+    FString GetOutputItemPackagePath(const FAtlasJobHistoryRecord& Record,const FString& Name,int32 Index) const;
+
 
 	/**
 	 * Check if a job output is already imported (by output name) - THE SIMPLE WAY.

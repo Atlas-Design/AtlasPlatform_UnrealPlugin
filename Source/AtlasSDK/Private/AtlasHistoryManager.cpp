@@ -582,6 +582,12 @@ FAtlasJobHistoryRecord UAtlasHistoryManager::JobToRecord(UAtlasJob* Job)
 	}
 
 	for (const auto& Pair : Job->Inputs.Values) Record.Inputs.Values.Add(Pair.Key, Pair.Value.WithoutFileData());
+    if (const auto* Workflow=Job->GetExecutionWorkflow()) for (const auto& Def : Workflow->GetSchema().Inputs) {
+        if (Def.bHasRequiredMetadata && !Def.bRequired && !Job->Inputs.Values.Contains(Def.Name)) {
+            FAtlasValue Omitted; Omitted.Type=Def.Type; Omitted.OriginalType=Def.OriginalType; Omitted.FileFormat=Def.Format; Omitted.bIsArray=Def.bIsArray; Omitted.bOmitted=true;
+            Record.Inputs.Values.Add(Def.Name,Omitted);
+        }
+    }
 	for (const auto& Pair : Job->Outputs.Values)
 	{
 		Record.Outputs.Values.Add(Pair.Key, Pair.Value.WithoutFileData());
@@ -905,14 +911,14 @@ bool UAtlasHistoryManager::JsonToRecord(const TSharedPtr<FJsonObject>& JsonObj, 
 	const TSharedPtr<FJsonObject>* InputsJson;
 	if (JsonObj->TryGetObjectField(TEXT("inputs"), InputsJson))
 	{
-		JsonToInputs(*InputsJson, OutRecord.Inputs);
+		if (!JsonToInputs(*InputsJson, OutRecord.Inputs)) return false;
 	}
 
 	// Deserialize outputs
 	const TSharedPtr<FJsonObject>* OutputsJson;
 	if (JsonObj->TryGetObjectField(TEXT("outputs"), OutputsJson))
 	{
-		JsonToOutputs(*OutputsJson, OutRecord.Outputs);
+		if (!JsonToOutputs(*OutputsJson, OutRecord.Outputs)) return false;
 	}
 
 	// Deserialize output file paths
@@ -935,7 +941,7 @@ bool UAtlasHistoryManager::JsonToRecord(const TSharedPtr<FJsonObject>& JsonObj, 
 		if (!Path->IsEmpty() && !AtlasArchive::IsContained(Root, *Path)) Path->Empty();
 	for (auto* Values : { &OutRecord.Inputs.Values, &OutRecord.Outputs.Values })
 		for (auto& Pair : *Values)
-			if (!Pair.Value.FilePath.IsEmpty() && !AtlasArchive::IsContained(Root, Pair.Value.FilePath)) Pair.Value.FilePath.Empty();
+			Pair.Value.ForEachFile([&](auto& Item, int32) { if (!Item.FilePath.IsEmpty() && !AtlasArchive::IsContained(Root, Item.FilePath)) Item.FilePath.Empty(); });
 	for (auto It = OutRecord.OutputFilePaths.CreateIterator(); It; ++It)
 		if (!AtlasArchive::IsContained(Root, It.Value())) It.RemoveCurrent();
 	return OutRecord.IsValid();
@@ -952,6 +958,33 @@ TSharedPtr<FJsonObject> UAtlasHistoryManager::InputsToJson(const FAtlasWorkflowI
 
 		TSharedPtr<FJsonObject> ValueJson = MakeShared<FJsonObject>();
 		ValueJson->SetStringField(TEXT("type"), UEnum::GetValueAsString(Value.Type));
+		ValueJson->SetBoolField(TEXT("omitted"),Value.bOmitted);
+		ValueJson->SetStringField(TEXT("originalType"), Value.OriginalType);
+		ValueJson->SetStringField(TEXT("fileFormat"), Value.FileFormat);
+        ValueJson->SetStringField(TEXT("SourceKind"), Value.SourceKind);
+        ValueJson->SetStringField(TEXT("SourceAssetPath"), Value.SourceAssetPath);
+        ValueJson->SetStringField(TEXT("SourceOrigin"), Value.SourceOrigin);
+        ValueJson->SetStringField(TEXT("OriginalFileName"), Value.OriginalFileName);
+
+
+        if (Value.bIsArray)
+        {
+            ValueJson->SetBoolField(TEXT("isArray"),true);
+            TArray<TSharedPtr<FJsonValue>> Items;
+            for (const auto& Item : Value.FileItems)
+            {
+                auto JsonItem=MakeShared<FJsonObject>();
+                JsonItem->SetStringField(TEXT("fileId"),Item.FileId); JsonItem->SetStringField(TEXT("filePath"),Item.FilePath);
+                JsonItem->SetStringField(TEXT("fileName"),Item.FileName); JsonItem->SetStringField(TEXT("warning"),Item.Warning);
+                JsonItem->SetStringField(TEXT("SourceKind"), Item.SourceKind);
+                JsonItem->SetStringField(TEXT("SourceAssetPath"), Item.SourceAssetPath);
+                JsonItem->SetStringField(TEXT("SourceOrigin"), Item.SourceOrigin);
+                JsonItem->SetStringField(TEXT("OriginalFileName"), Item.OriginalFileName);
+
+                Items.Add(MakeShared<FJsonValueObject>(JsonItem));
+            }
+            ValueJson->SetArrayField(TEXT("items"),Items); Json->SetObjectField(Name,ValueJson); continue;
+        }
 
 		switch (Value.Type)
 		{
@@ -995,7 +1028,7 @@ TSharedPtr<FJsonObject> UAtlasHistoryManager::OutputsToJson(const FAtlasWorkflow
 {
 	// Same format as inputs
 	FAtlasWorkflowInputs TempInputs;
-	TempInputs.Values = Outputs.Values;
+	for (const auto& Pair : Outputs.Values) TempInputs.Values.Add(Pair.Key, Pair.Value.WithoutFileData());
 	return InputsToJson(TempInputs);
 }
 
@@ -1035,6 +1068,36 @@ bool UAtlasHistoryManager::JsonToInputs(const TSharedPtr<FJsonObject>& JsonObj, 
 			else if (TypeStr.Contains(TEXT("File"))) Value.Type = EAtlasValueType::File;
 			else if (TypeStr.Contains(TEXT("Json"))) Value.Type = EAtlasValueType::Json;
 		}
+
+		(*ValueJson)->TryGetBoolField(TEXT("omitted"),Value.bOmitted);
+		(*ValueJson)->TryGetStringField(TEXT("originalType"), Value.OriginalType);
+		(*ValueJson)->TryGetStringField(TEXT("fileFormat"), Value.FileFormat);
+        (*ValueJson)->TryGetStringField(TEXT("SourceKind"), Value.SourceKind);
+        (*ValueJson)->TryGetStringField(TEXT("SourceAssetPath"), Value.SourceAssetPath);
+        (*ValueJson)->TryGetStringField(TEXT("SourceOrigin"), Value.SourceOrigin);
+        (*ValueJson)->TryGetStringField(TEXT("OriginalFileName"), Value.OriginalFileName);
+
+        (*ValueJson)->TryGetBoolField(TEXT("isArray"),Value.bIsArray);
+        if (Value.bIsArray)
+        {
+            const TArray<TSharedPtr<FJsonValue>>* Items=nullptr;
+            if (!Value.IsFileType() || !(*ValueJson)->TryGetArrayField(TEXT("items"),Items)) return false;
+            for (const auto& JsonItem : *Items)
+            {
+                const TSharedPtr<FJsonObject>* Object=nullptr;
+                if (!JsonItem->TryGetObject(Object)) return false;
+                FAtlasFileReference Item;
+                (*Object)->TryGetStringField(TEXT("fileId"),Item.FileId); (*Object)->TryGetStringField(TEXT("filePath"),Item.FilePath);
+                (*Object)->TryGetStringField(TEXT("fileName"),Item.FileName); (*Object)->TryGetStringField(TEXT("warning"),Item.Warning);
+                (*Object)->TryGetStringField(TEXT("SourceKind"), Item.SourceKind);
+                (*Object)->TryGetStringField(TEXT("SourceAssetPath"), Item.SourceAssetPath);
+                (*Object)->TryGetStringField(TEXT("SourceOrigin"), Item.SourceOrigin);
+                (*Object)->TryGetStringField(TEXT("OriginalFileName"), Item.OriginalFileName);
+
+                Value.FileItems.Add(Item);
+            }
+            OutInputs.Values.Add(Name,MoveTemp(Value)); continue;
+        }
 
 		switch (Value.Type)
 		{

@@ -31,6 +31,24 @@ struct ATLASSDK_API FAtlasParameterDef
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Atlas|Schema")
 	EAtlasValueType Type = EAtlasValueType::String;
 
+	/** Original platform token; transport families do not imply native import support. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Atlas|Schema")
+	FString OriginalType;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Atlas|Schema")
+	bool bIsArray = false;
+	/** Legacy custom exports without required metadata retain their previous required behavior. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Atlas|Schema")
+	bool bRequired = true;
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Atlas|Schema")
+	bool bHasRequiredMetadata = false;
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Atlas|Schema")
+	bool bHasDefaultValue = false;
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Atlas|Schema")
+	bool bDefaultIsNull = false;
+	/** Exact JSON representation preserves list/default presence until typed list support is available. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Atlas|Schema")
+	FString DefaultValueJson;
+
 	/** Default value as string (parsed based on Type) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Atlas|Schema")
 	FString DefaultValue;
@@ -66,8 +84,43 @@ struct ATLASSDK_API FAtlasParameterDef
 	/** File format hint from schema (e.g., "mp3", "wav") - used for audio/file outputs */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Atlas|Schema")
 	FString Format;
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Atlas|Schema") bool bHasExplicitFormat=false;
 
 	// ==================== Helper Methods (C++) ====================
+
+    /** One extension policy for selection and execution. Explicit format wins over fallbacks. */
+    TArray<FString> GetSelectionExtensions() const
+    {
+        TArray<FString> Result;
+        if (bHasExplicitFormat && !Format.IsEmpty()) Result={Format};
+        else if (!AllowedExtensions.IsEmpty()) Result=AllowedExtensions;
+        else
+        {
+            const FString Token=OriginalType.ToLower();
+            if (Token==TEXT("agent_context")) Result={TEXT("atlas-context.json"),TEXT("json")};
+            else if (Token==TEXT("video")) Result={TEXT("mp4"),TEXT("mov"),TEXT("webm"),TEXT("avi"),TEXT("mkv")};
+            else if (Token==TEXT("scene")) Result={TEXT("blend")};
+            else if (Token==TEXT("rig_animation")) Result={TEXT("glb")};
+            else if (Token==TEXT("jpeg")) Result={TEXT("jpg")};
+            else if (Token==TEXT("tiff")) Result={TEXT("tiff")};
+            else if (TArray<FString>{TEXT("exr"),TEXT("webp"),TEXT("avif"),TEXT("tga"),TEXT("svg"),TEXT("fbx"),TEXT("usdz"),TEXT("pdf")}.Contains(Token)) Result={Token};
+            else if (Type==EAtlasValueType::Image) Result={TEXT("png"),TEXT("jpg"),TEXT("bmp"),TEXT("tga"),TEXT("tiff"),TEXT("exr"),TEXT("webp"),TEXT("avif")};
+            else if (Type==EAtlasValueType::Mesh) Result={TEXT("glb")};
+            else if (Type==EAtlasValueType::Audio) Result={TEXT("wav"),TEXT("mp3"),TEXT("ogg"),TEXT("aif"),TEXT("aiff"),TEXT("flac"),TEXT("m4a")};
+        }
+        for (auto& Ext : Result) { Ext=Ext.TrimStartAndEnd().ToLower(); Ext.RemoveFromStart(TEXT(".")); }
+        if (Result.Contains(TEXT("jpg")) || Result.Contains(TEXT("jpeg"))) { Result.AddUnique(TEXT("jpg")); Result.AddUnique(TEXT("jpeg")); }
+        if (Result.Contains(TEXT("tif")) || Result.Contains(TEXT("tiff"))) { Result.AddUnique(TEXT("tif")); Result.AddUnique(TEXT("tiff")); }
+        return Result;
+    }
+    bool ValidateFilePath(const FString& Path,FString& Error) const
+    {
+        if (Path.IsEmpty() || !FPaths::FileExists(Path)) { Error=TEXT("File is missing or is a folder; choose an existing file"); return false; }
+        const auto Extensions=GetSelectionExtensions();
+        if (!Extensions.IsEmpty() && !Extensions.ContainsByPredicate([&](const FString& Ext) { return Path.EndsWith(TEXT(".")+Ext,ESearchCase::IgnoreCase); }))
+        { Error=TEXT("Expected ")+FString::Join(Extensions,TEXT(", ")); return false; }
+        return true;
+    }
 
 	/** Get the display name, falling back to Name if DisplayName is empty */
 	FString GetDisplayName() const
@@ -103,7 +156,7 @@ struct ATLASSDK_API FAtlasParameterDef
 		FAtlasParameterDef Def;
 		Def.Name = InName;
 		Def.DisplayName = InDisplayName.IsEmpty() ? InName : InDisplayName;
-		Def.Type = Value.Type;
+		Def.Type = Value.Type; Def.OriginalType=Value.OriginalType; Def.bIsArray=Value.bIsArray; Def.Format=Value.FileFormat;
 		
 		// For file types, try to infer allowed extensions from filename
 		if (Value.IsFileType() && !Value.FileName.IsEmpty())
@@ -121,10 +174,24 @@ struct ATLASSDK_API FAtlasParameterDef
 	/** Parse the default value string into an FAtlasValue */
 	FAtlasValue GetDefaultValueAsAtlasValue() const
 	{
-		if (DefaultValue.IsEmpty())
+		if (bDefaultIsNull || (!bHasDefaultValue && DefaultValue.IsEmpty()))
 		{
 			return FAtlasValue();
 		}
+
+        if (bIsArray)
+        {
+            TArray<TSharedPtr<FJsonValue>> Items;
+            if (!FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(DefaultValueJson), Items)) return FAtlasValue();
+            FAtlasValue Result=FAtlasValue::MakeFileList(Type, {}); Result.OriginalType=OriginalType; Result.FileFormat=Format;
+            for (const auto& Item : Items)
+            {
+                FAtlasFileReference Ref;
+                if (!Item->TryGetString(Ref.FileId)) return FAtlasValue();
+                Result.FileItems.Add(Ref);
+            }
+            return Result;
+        }
 
 		switch (Type)
 		{
@@ -138,6 +205,16 @@ struct ATLASSDK_API FAtlasParameterDef
 			return FAtlasValue::MakeBool(DefaultValue.ToBool());
 		case EAtlasValueType::Json:
 			return FAtlasValue::MakeJson(DefaultValue);
+		case EAtlasValueType::Image:
+		case EAtlasValueType::Mesh:
+		case EAtlasValueType::Audio:
+		case EAtlasValueType::File:
+		case EAtlasValueType::FileId:
+			{
+			FAtlasValue Result = DefaultValue.IsEmpty() ? FAtlasValue() : FAtlasValue::MakeFileId(DefaultValue);
+			Result.OriginalType = OriginalType; Result.FileFormat = Format;
+			return Result;
+		}
 		default:
 			return FAtlasValue();
 		}
@@ -146,7 +223,31 @@ struct ATLASSDK_API FAtlasParameterDef
 	/** Validate a value against this parameter definition */
 	bool ValidateValue(const FAtlasValue& Value, FString& OutError) const
 	{
-		// All inputs are required - no value means failure
+		if (Value.bOmitted) { OutError=TEXT("Omitted history markers must be removed from request inputs"); return false; }
+        if (Type==EAtlasValueType::None) { OutError=TEXT("Unsupported input type: ")+OriginalType; return false; }
+        // None is an explicit invalid value. Optional omission is handled by the schema map check.
+        if (bIsArray != Value.bIsArray)
+        {
+            OutError=FString::Printf(TEXT("Input '%s' expects %s"), *Name, bIsArray ? TEXT("a file list") : TEXT("a scalar")); return false;
+        }
+        if (bIsArray)
+        {
+            if (!IsFileType() || Value.Type != Type)
+            { OutError=FString::Printf(TEXT("Input '%s' has an incompatible file-list type"), *Name); return false; }
+            FAtlasParameterDef Scalar=*this; Scalar.bIsArray=false;
+            for (int32 I=0; I<Value.FileItems.Num(); ++I)
+            {
+                const auto& Ref=Value.FileItems[I]; FAtlasValue Item; Item.Type=Type;
+                Item.FileId=Ref.FileId; Item.FilePath=Ref.FilePath; Item.FileName=Ref.FileName;
+                // Presence only; don't copy potentially large buffers just to validate.
+                if (Item.FileId.IsEmpty() && Item.FilePath.IsEmpty() && !Ref.FileData.IsEmpty()) continue;
+                FString Detail;
+                if (!Scalar.ValidateValue(Item, Detail))
+                { OutError=FString::Printf(TEXT("Input '%s' item %d: %s"), *Name, I+1, *Detail); return false; }
+            }
+            return true;
+        }
+
 		if (Value.Type == EAtlasValueType::None)
 		{
 			OutError = FString::Printf(TEXT("Input '%s' is missing"), *GetDisplayName());
@@ -189,6 +290,7 @@ struct ATLASSDK_API FAtlasParameterDef
 			}
 		}
 
+        if (IsFileType() && Value.FileId.IsEmpty() && !Value.FilePath.IsEmpty() && !ValidateFilePath(Value.FilePath,OutError)) return false;
 		if (Type == EAtlasValueType::Json)
 		{
 			TSharedPtr<FJsonValue> Json;
@@ -433,24 +535,17 @@ struct ATLASSDK_API FAtlasWorkflowSchema
 		return Names;
 	}
 
-	/** Validate inputs against this schema - requires exact 1:1 match */
+	/** Validate provided inputs; only explicitly optional inputs may be omitted. */
 	bool ValidateInputs(const FAtlasWorkflowInputs& InputValues, TArray<FString>& OutErrors) const
 	{
 		OutErrors.Empty();
 		bool bValid = true;
 
-		// First check: count must match exactly
-		int32 ExpectedCount = Inputs.Num();
-		int32 ProvidedCount = InputValues.Num();
-		if (ProvidedCount != ExpectedCount)
-		{
-			OutErrors.Add(FString::Printf(TEXT("Input count mismatch: expected %d, got %d"), ExpectedCount, ProvidedCount));
-			bValid = false;
-		}
-
+		for (const auto& Output : Outputs) if (Output.Type==EAtlasValueType::None) { OutErrors.Add(TEXT("Unsupported output type: ")+Output.OriginalType); bValid=false; }
 		// Check each schema-defined input exists and has correct type
 		for (const FAtlasParameterDef& InputDef : Inputs)
 		{
+			if (!InputDef.bRequired && !InputValues.Values.Contains(InputDef.Name)) continue;
 			FAtlasValue Value;
 			InputValues.GetValue(InputDef.Name, Value);
 
@@ -492,10 +587,8 @@ struct ATLASSDK_API FAtlasWorkflowSchema
 
 		for (const FAtlasParameterDef& InputDef : Inputs)
 		{
-			if (!InputDef.DefaultValue.IsEmpty())
-			{
-				DefaultInputs.SetValue(InputDef.Name, InputDef.GetDefaultValueAsAtlasValue());
-			}
+			const FAtlasValue Value = InputDef.GetDefaultValueAsAtlasValue();
+			if (Value.Type != EAtlasValueType::None) DefaultInputs.SetValue(InputDef.Name, Value);
 		}
 
 		return DefaultInputs;

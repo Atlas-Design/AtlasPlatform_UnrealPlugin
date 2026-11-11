@@ -1,4 +1,5 @@
 #include "AtlasNativeWorkflowWidgets.h"
+#include "AtlasFileWidgets.h"
 #include "AtlasNativeInputWidgets.h"
 #include "AtlasUIHelpers.h"
 #include "AtlasEditorSubsystem.h"
@@ -23,6 +24,13 @@
 #include "Engine/StaticMesh.h"
 #include "Sound/SoundWave.h"
 #include "ScopedTransaction.h"
+#include "DesktopPlatformModule.h"
+#include "Factories/SoundFactory.h"
+#include "IDesktopPlatform.h"
+#include "Framework/Application/SlateApplication.h"
+#include "HAL/FileManager.h"
+#include "HAL/PlatformProcess.h"
+#include "Misc/Paths.h"
 
 namespace
 {
@@ -46,6 +54,9 @@ void UAtlasParameterRowWidget::NativeConstruct()
 {
     Super::NativeConstruct();
     bReady = true;
+    if (ButtonRevealOutput) ButtonRevealOutput->OnClicked.AddUniqueDynamic(this, &ThisClass::RevealOutput);
+    if (ButtonSaveOutput) ButtonSaveOutput->OnClicked.AddUniqueDynamic(this, &ThisClass::SaveOutputAs);
+    if (ButtonCopyAssetId) ButtonCopyAssetId->OnClicked.AddUniqueDynamic(this, &ThisClass::CopyAssetId);
     EUW_ImportImage->OnClicked.AddUniqueDynamic(this, &ThisClass::ImportToProject);
     EUW_ImportMeshProject->OnClicked.AddUniqueDynamic(this, &ThisClass::ImportToProject);
     EUW_ImportAudio->OnClicked.AddUniqueDynamic(this, &ThisClass::ImportToProject);
@@ -59,6 +70,9 @@ void UAtlasParameterRowWidget::NativeDestruct()
 {
     // Designer previews and reinstanced objects can be torn down without bound controls.
     bReady = false;
+    if (IsValid(ButtonRevealOutput)) ButtonRevealOutput->OnClicked.RemoveDynamic(this, &ThisClass::RevealOutput);
+    if (IsValid(ButtonSaveOutput)) ButtonSaveOutput->OnClicked.RemoveDynamic(this, &ThisClass::SaveOutputAs);
+    if (IsValid(ButtonCopyAssetId)) ButtonCopyAssetId->OnClicked.RemoveDynamic(this, &ThisClass::CopyAssetId);
     if (IsValid(ImagePReview)) UAtlasUIHelpers::LoadPreviewIntoImage(ImagePReview, FString(), nullptr);
     if (IsValid(EUW_ImportImage)) EUW_ImportImage->OnClicked.RemoveDynamic(this, &ThisClass::ImportToProject);
     if (IsValid(EUW_ImportMeshProject)) EUW_ImportMeshProject->OnClicked.RemoveDynamic(this, &ThisClass::ImportToProject);
@@ -99,7 +113,8 @@ void UAtlasParameterRowWidget::RefreshParameter()
     }
     WidgetSwitcher_ParamType->SetActiveWidgetIndex(Index);
     FString Text = Value.StringValue;
-    if (Value.Type == EAtlasValueType::Json) Text = Value.JsonValue;
+    if (Value.bIsArray) { Text=Value.ToString(); WidgetSwitcher_ParamType->SetActiveWidgetIndex(0); }
+    else if (Value.Type == EAtlasValueType::Json) Text = Value.JsonValue;
     else if (Value.Type == EAtlasValueType::FileId) Text = Value.FileId;
     else if (Value.IsFileType()) Text = Value.FileName;
     ValueText00->SetText(FText::FromString(Text));
@@ -109,10 +124,17 @@ void UAtlasParameterRowWidget::RefreshParameter()
     ValueNumber2->SetValue(Value.Type == EAtlasValueType::Integer ? Value.IntValue : Value.NumberValue);
     for (UEditableText* Label : {ValueImage3.Get(), ValueMesh4.Get(), ValueAudio5.Get()})
         Label->SetText(FText::FromString(Value.FileName));
-    const bool bImportable = bOutput && Record.Outputs.Values.Contains(ParameterName);
+    const bool bHasOutput = bOutput && Record.Outputs.Values.Contains(ParameterName);
+    const bool bFile = Value.IsFileType() || Value.Type == EAtlasValueType::FileId;
+    const bool bImportable = CanImportOutput();
+    const bool bLocal = !GetLocalOutputPath().IsEmpty();
+    if (FileActions) FileActions->SetVisibility(bHasOutput && bFile && !Value.bIsArray ? ESlateVisibility::Visible : ESlateVisibility::Collapsed);
+    if (ButtonRevealOutput) ButtonRevealOutput->SetIsEnabled(bLocal);
+    if (ButtonSaveOutput) ButtonSaveOutput->SetIsEnabled(bLocal);
+    if (ButtonCopyAssetId) ButtonCopyAssetId->SetIsEnabled(!Value.FileId.IsEmpty());
     for (UButton* Button : {EUW_ImportImage.Get(), EUW_ImportMeshProject.Get(), EUW_ImportMeshScene.Get(), EUW_ImportAudio.Get()})
         Button->SetVisibility(bImportable ? ESlateVisibility::Visible : ESlateVisibility::Collapsed);
-    if (Value.Type == EAtlasValueType::Image || Value.Type == EAtlasValueType::Mesh || Value.Type == EAtlasValueType::Audio)
+    if (!FilePresentation && !Value.bIsArray && (Value.Type == EAtlasValueType::Image || Value.Type == EAtlasValueType::Mesh || Value.Type == EAtlasValueType::Audio))
     {
         if (auto* Manager = OutputManager(this))
         {
@@ -131,6 +153,16 @@ void UAtlasParameterRowWidget::RefreshParameter()
         }
     }
     RefreshEditability();
+    if (FilePresentation) {
+        const bool IsFile=Value.IsFileType() || Value.IsFileId();
+        FilePresentation->SetVisibility(IsFile ? ESlateVisibility::Visible : ESlateVisibility::Collapsed);
+        if (IsFile) {
+            FilePresentation->Configure(FAtlasParameterDef::FromValue(Value,ParameterName),Value,bOutput ? EAtlasFilePresentation::Output : EAtlasFilePresentation::RecordedInput,Record);
+            WidgetSwitcher_ParamType->SetVisibility(ESlateVisibility::Collapsed); ImagePReview->SetVisibility(ESlateVisibility::Collapsed);
+            if (FileActions) FileActions->SetVisibility(ESlateVisibility::Collapsed);
+        } else WidgetSwitcher_ParamType->SetVisibility(bEditable ? ESlateVisibility::Visible : ESlateVisibility::Collapsed);
+        if (RecordedScalar) { RecordedScalar->SetVisibility(!IsFile && !bEditable ? ESlateVisibility::Visible : ESlateVisibility::Collapsed); RecordedScalar->SetText(FText::FromString(Value.bOmitted ? TEXT("Omitted - Uses server default") : Value.ToString())); }
+    }
     OnParameterPresentationChanged();
 }
 void UAtlasParameterRowWidget::RefreshEditability()
@@ -161,9 +193,64 @@ void UAtlasParameterRowWidget::PresentAudio(UObject* InObject)
 {
     audio = Cast<USoundWave>(InObject); PresentProperty(audio, AudioProperty, GET_MEMBER_NAME_CHECKED(ThisClass, audio));
 }
+bool UAtlasParameterRowWidget::CanImportOutput() const
+{
+    if (Value.bIsArray || !bOutput || !Record.Outputs.Values.Contains(ParameterName)) return false;
+    const FString Extension = FPaths::GetExtension(Value.FileName).ToLower();
+    // Expose only established adapters. HDR/new raster and animated meshes need dedicated acceptance.
+    if (Value.Type == EAtlasValueType::Image)
+        return Extension == TEXT("png") || Extension == TEXT("jpg") || Extension == TEXT("jpeg");
+    if (Value.Type == EAtlasValueType::Mesh && Value.OriginalType != TEXT("rig_animation"))
+        return Extension == TEXT("glb") || Extension == TEXT("gltf") || Extension == TEXT("fbx") || Extension == TEXT("obj");
+    if (Value.Type == EAtlasValueType::Audio)
+    {
+        for (const FString& Format : GetDefault<USoundFactory>()->Formats)
+            if (Format.StartsWith(Extension + TEXT(";"), ESearchCase::IgnoreCase)) return true;
+    }
+    return false;
+}
+FString UAtlasParameterRowWidget::GetLocalOutputPath() const
+{
+    if (!bOutput || !Record.Outputs.Values.Contains(ParameterName)) return FString();
+    auto* Manager = OutputManager(const_cast<ThisClass*>(this));
+    // This resolver validates archive containment and existence, including paths stored in history.
+    return Manager ? Manager->GetOutputFilePathForJobFromHistory(Record, ParameterName) : FString();
+}
+bool UAtlasParameterRowWidget::SaveOutputCopy(const FString& Destination)
+{
+    const FString Source = GetLocalOutputPath();
+    if (Source.IsEmpty() || Destination.IsEmpty() || FPaths::IsRelative(Destination)) return false;
+    if (FPaths::IsSamePath(Source, Destination)) return true;
+    // No silent overwrite through the callable API. The dialog checks this too.
+    return !FPaths::FileExists(Destination) && IFileManager::Get().Copy(*Destination, *Source, false) == COPY_OK;
+}
+void UAtlasParameterRowWidget::RevealOutput()
+{
+    const FString Path = GetLocalOutputPath();
+    if (!Path.IsEmpty()) FPlatformProcess::ExploreFolder(*FPaths::GetPath(Path));
+}
+void UAtlasParameterRowWidget::CopyAssetId()
+{
+    if (bOutput && !Value.FileId.IsEmpty()) UAtlasUIHelpers::CopyToClipboard(Value.FileId);
+}
+void UAtlasParameterRowWidget::SaveOutputAs()
+{
+    const FString Path = GetLocalOutputPath();
+    IDesktopPlatform* Desktop = FDesktopPlatformModule::Get();
+    if (Path.IsEmpty() || !Desktop) return;
+    TArray<FString> Destinations;
+    if (Desktop->SaveFileDialog(FSlateApplication::Get().FindBestParentWindowHandleForDialogs(nullptr),
+        TEXT("Save Atlas output copy"), FPaths::GetPath(Path), FPaths::GetCleanFilename(Path),
+        TEXT("All files (*.*)|*.*"), 0, Destinations) && Destinations.Num() > 0)
+    {
+        if (!SaveOutputCopy(FPaths::ConvertRelativePathToFull(Destinations[0])))
+            UAtlasUIHelpers::ShowNotification(TEXT("Could not save this copy. Choose a new filename; existing files are preserved."), false);
+    }
+}
+
 UObject* UAtlasParameterRowWidget::ImportAsset()
 {
-    if (!bOutput || !Record.Outputs.Values.Contains(ParameterName)) return nullptr;
+    if (!CanImportOutput()) return nullptr;
     auto* Manager = OutputManager(this);
     if (!Manager) return nullptr;
     const FAtlasImportResult Result = Manager->ImportJobOutputFromHistory(Record, ParameterName);
@@ -256,6 +343,7 @@ void UAtlasCurrentWorkflowWidget::RefreshWorkflow()
 void UAtlasCurrentWorkflowWidget::ClearInputFields()
 {
     for (UAtlasInputFieldWidget* Field : Fields) Field->OnInputUpdated.RemoveDynamic(this, &ThisClass::RefreshInputs);
+    for (UAtlasInputFieldWidget* Field : Fields) if (IsValid(Field)) Field->InvalidateSelection();
     Fields.Reset();
     if (VB_Inputs_Container) VB_Inputs_Container->ClearChildren();
     Inputs.Values.Reset(); bInputsValid = false;
@@ -277,6 +365,7 @@ void UAtlasCurrentWorkflowWidget::RebuildInputs(const TArray<FAtlasParameterDef>
             {
                 auto* Field = CreateWidget<UAtlasInputFieldWidget>(this, InputWidgetClass);
                 if (!Field) continue;
+                Field->ServiceOrigin=CurrentWorkflow ? CurrentWorkflow->Schema.GetCleanBaseUrl() : FString();
                 Field->currentDefParameter = Def;
                 Field->defaultValue = Def.GetDefaultValueAsAtlasValue();
                 VB_Inputs_Container->AddChildToVerticalBox(Field);
@@ -296,7 +385,7 @@ void UAtlasCurrentWorkflowWidget::RebuildOutputs(const TArray<FAtlasParameterDef
     {
         auto* Row = CreateWidget<UAtlasParameterRowWidget>(this, OutputRowClass);
         if (!Row) continue;
-        FAtlasValue Placeholder; Placeholder.Type = Def.Type;
+        FAtlasValue Placeholder; Placeholder.Type = Def.Type; Placeholder.bIsArray=Def.bIsArray; Placeholder.OriginalType=Def.OriginalType; Placeholder.FileFormat=Def.Format;
         Row->ConfigureParameter(false, Def.GetDisplayName(), Placeholder, false, FAtlasJobHistoryRecord());
         VB_Outputs_Container->AddChildToVerticalBox(Row)->SetPadding(FMargin(0.f, 3.f));
     }
@@ -305,14 +394,13 @@ void UAtlasCurrentWorkflowWidget::RefreshInputs()
 {
     if (!bReady || bBuilding || bCollecting) return;
     TGuardValue<bool> Guard(bCollecting, true);
-    Inputs.Values.Reset();
+    Inputs.Values.Reset(); TArray<FString> Errors; bInputsValid=CurrentWorkflow!=nullptr;
     for (UAtlasInputFieldWidget* Field : Fields)
     {
-        FString Name; FAtlasValue Collected;
-        Field->CollectValue(Name, Collected); Inputs.SetValue(Name, Collected);
+        FString Error; if (!Field->ValidateSelection(Error)) { Errors.Add(Field->currentDefParameter.GetDisplayName()+TEXT(": ")+Error); bInputsValid=false; }
+        if (!Field->bUseServerDefault) { FString Name; FAtlasValue Collected; Field->CollectValue(Name,Collected); Inputs.SetValue(Name,Collected); }
     }
-    TArray<FString> Errors;
-    bInputsValid = CurrentWorkflow && CurrentWorkflow->ValidateInputs(Inputs, Errors);
+    if (CurrentWorkflow) for (const auto& Def : CurrentWorkflow->Schema.Outputs) if (Def.Type==EAtlasValueType::None) { bInputsValid=false; Errors.Add(TEXT("Unsupported output type: ")+Def.OriginalType); }
     ButtonRunWorkflow->SetIsEnabled(bInputsValid);
     ButtonRunWorkflow->SetToolTipText(FText::FromString(CurrentWorkflow ? FString::Join(Errors, TEXT("\n")) : TEXT("Select a workflow")));
 }
@@ -320,6 +408,15 @@ void UAtlasCurrentWorkflowWidget::RunWorkflow()
 {
     RefreshInputs(); // Include edits that have not yet emitted a commit event.
     if (!bReady || !bInputsValid || !CurrentWorkflow) return;
+    FAtlasWorkflowInputs Prepared;
+    for (UAtlasInputFieldWidget* Field : Fields) if (!Field->bUseServerDefault) {
+        FAtlasValue Value; FString Error;
+        if (!Field->PrepareValue(Value,Error)) { UAtlasUIHelpers::ShowNotification(Error,false); return; }
+        Prepared.SetValue(Field->currentDefParameter.Name,Value);
+    }
+    TArray<FString> Errors;
+    if (!CurrentWorkflow->ValidateInputs(Prepared,Errors)) { UAtlasUIHelpers::ShowNotification(FString::Join(Errors,TEXT("\n")),false); return; }
+    Inputs=MoveTemp(Prepared);
     auto* Subsystem = UAtlasUIHelpers::GetEditorSubsystem(this);
     UAtlasJob* Job = Subsystem ? Subsystem->CreateJob(CurrentWorkflow, Inputs) : nullptr;
     if (Job) Job->Execute();

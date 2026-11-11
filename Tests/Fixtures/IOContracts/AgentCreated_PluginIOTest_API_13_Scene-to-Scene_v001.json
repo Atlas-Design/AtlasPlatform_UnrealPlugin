@@ -1,0 +1,22 @@
+{
+  "version": "0.2",
+  "api_id": "8438de41-b8d4-4514-92be-5461285bc15c",
+  "base_url": "https://api.dev.atlas.design",
+  "name": "AgentCreated | Plugin IO Test | API | 13 Scene to Scene | v001",
+  "inputs": [
+    {
+      "id": "scene_input",
+      "label": "scene_input",
+      "type": "scene",
+      "required": true,
+      "default_value": null
+    }
+  ],
+  "outputs": [
+    {
+      "id": "scene_output",
+      "type": "scene",
+      "format": "blend"
+    }
+  ]
+}

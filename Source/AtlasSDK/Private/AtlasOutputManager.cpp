@@ -342,11 +342,9 @@ TArray<FString> UAtlasOutputManager::GetAllOutputFilesForJobFromHistory(const FA
 
 	for (const auto& Pair : HistoryRecord.Outputs.Values)
 	{
-		const FAtlasValue& OutputValue = Pair.Value;
-		if (AtlasArchive::IsContained(GetOutputFolder(), OutputValue.FilePath))
-		{
-			UniquePaths.Add(OutputValue.FilePath);
-		}
+		Pair.Value.ForEachFile([&](const auto& Item, int32) {
+            if (AtlasArchive::IsContained(GetOutputFolder(),Item.FilePath)) UniquePaths.Add(Item.FilePath);
+        });
 	}
 
 	FAtlasJobFolderInfo FolderInfo = GetJobFolderInfoFromHistory(HistoryRecord);
@@ -899,6 +897,58 @@ FString UAtlasOutputManager::GetJobJsonPathFromHistory(const FAtlasJobHistoryRec
 // ==================== Import Utilities (Editor Only) ====================
 
 #if WITH_EDITOR
+
+
+FString UAtlasOutputManager::GetOutputItemPath(const FAtlasJobHistoryRecord& Record,const FString& Name,int32 Index) const
+{
+    if (Index==INDEX_NONE) return GetOutputFilePathForJobFromHistory(Record,Name);
+    const auto* Value=Record.Outputs.Values.Find(Name);
+    if (!Record.IsValid() || !Value || !Value->bIsArray || !Value->FileItems.IsValidIndex(Index)) return FString();
+    const FString Path=Value->FileItems[Index].FilePath;
+    return AtlasArchive::IsContained(GetOutputFolder(),Path) && FPaths::FileExists(Path) ? Path : FString();
+}
+FString UAtlasOutputManager::GetOutputItemPackagePath(const FAtlasJobHistoryRecord& Record,const FString& Name,int32 Index) const
+{
+    const auto Folder=GetJobFolderInfoFromHistory(Record);
+    if (!Folder.IsValid()) return FString();
+    return Folder.ContentBrowserPath / AtlasArchive::Component(Name) / (Index==INDEX_NONE ? TEXT("Scalar") : FString::Printf(TEXT("Item_%06d"),Index));
+}
+FAtlasImportResult UAtlasOutputManager::FindImportedOutputItem(const FAtlasJobHistoryRecord& Record,const FString& Name,int32 Index,bool bLoadAsset) const
+{
+    FAtlasImportResult Result; const auto* Value=Record.Outputs.Values.Find(Name);
+    if (!Record.IsValid() || !Value || (Index!=INDEX_NONE && (!Value->bIsArray || !Value->FileItems.IsValidIndex(Index)))) return Result;
+    Result.PackagePath=GetOutputItemPackagePath(Record,Name,Index);
+    if (Result.PackagePath.IsEmpty()) return Result;
+    TArray<FAssetData> Assets;
+    FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get().GetAssetsByPath(*Result.PackagePath,Assets,true);
+    auto Accept=[&](const FAssetData& Asset) {
+        const FName Class=Asset.AssetClassPath.GetAssetName();
+        if ((Value->Type==EAtlasValueType::Image && Class==TEXT("Texture2D")) || (Value->Type==EAtlasValueType::Mesh && Class==TEXT("StaticMesh")) || (Value->Type==EAtlasValueType::Audio && Class==TEXT("SoundWave"))) {
+            Result.bSuccess=true; if (bLoadAsset) { Result.ImportedAsset=Asset.GetAsset(); Result.bSuccess=Result.ImportedAsset!=nullptr; } return Result.bSuccess;
+        }
+        return false;
+    };
+    for (const auto& Asset : Assets) if (Accept(Asset)) break;
+    if (!Result.bSuccess && Index==INDEX_NONE) {
+        // Reuse legacy scalar imports only when their basename identifies one output.
+        auto Basename=[](const FString& Key,const FAtlasValue& V){return V.FileName.IsEmpty() ? Key : FPaths::GetBaseFilename(V.FileName);};
+        const FString NameOnDisk=Basename(Name,*Value); int32 SameName=0;
+        for (const auto& Pair : Record.Outputs.Values) if (!Pair.Value.bIsArray && Basename(Pair.Key,Pair.Value)==NameOnDisk) ++SameName;
+        if (SameName==1) {
+            Assets.Empty(); FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get().GetAssetsByPath(*GetJobFolderInfoFromHistory(Record).ContentBrowserPath,Assets,false);
+            for (const auto& Asset : Assets) if (Asset.AssetName.ToString()==NameOnDisk && Accept(Asset)) break;
+        }
+    }
+    return Result;
+}
+FAtlasImportResult UAtlasOutputManager::ImportOutputItem(const FAtlasJobHistoryRecord& Record,const FString& Name,int32 Index)
+{
+    auto Result=FindImportedOutputItem(Record,Name,Index); if (Result.bSuccess) return Result;
+    const FString Path=GetOutputItemPath(Record,Name,Index); const FString Package=GetOutputItemPackagePath(Record,Name,Index);
+    const auto* Value=Record.Outputs.Values.Find(Name);
+    if (!Value || Path.IsEmpty() || Package.IsEmpty()) { Result.ErrorMessage=TEXT("Downloaded file unavailable"); return Result; }
+    return Value->Type==EAtlasValueType::Image ? ImportTextureAsset(Path,Package) : ImportMeshAsset(Path,Package);
+}
 
 FAtlasImportResult UAtlasOutputManager::ImportTextureAsset(const FString& FilePath, const FString& PackagePath)
 {

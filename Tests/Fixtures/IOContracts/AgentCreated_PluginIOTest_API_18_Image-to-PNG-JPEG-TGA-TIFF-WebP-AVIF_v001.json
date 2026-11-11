@@ -1,0 +1,47 @@
+{
+  "version": "0.2",
+  "api_id": "716dad49-8c07-4bf0-81e0-9e270c95789b",
+  "base_url": "https://api.dev.atlas.design",
+  "name": "AgentCreated | Plugin IO Test | API | 18 Image to PNG JPEG TGA TIFF WebP AVIF | v001",
+  "inputs": [
+    {
+      "id": "image_input",
+      "label": "image_input",
+      "type": "image",
+      "required": true,
+      "default_value": null
+    }
+  ],
+  "outputs": [
+    {
+      "id": "tga_output",
+      "type": "tga",
+      "format": "tga"
+    },
+    {
+      "id": "png_output",
+      "type": "image",
+      "format": "png"
+    },
+    {
+      "id": "jpeg_output",
+      "type": "jpeg",
+      "format": "jpg"
+    },
+    {
+      "id": "tiff_output",
+      "type": "tiff",
+      "format": "tiff"
+    },
+    {
+      "id": "avif_output",
+      "type": "avif",
+      "format": "avif"
+    },
+    {
+      "id": "webp_output",
+      "type": "webp",
+      "format": "webp"
+    }
+  ]
+}

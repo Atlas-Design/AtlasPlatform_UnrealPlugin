@@ -14,6 +14,12 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Blueprint/WidgetTree.h"
 #include "Components/Widget.h"
+#include "Components/VerticalBox.h"
+#include "Components/VerticalBoxSlot.h"
+#include "Components/HorizontalBox.h"
+#include "Components/Button.h"
+#include "Components/TextBlock.h"
+#include "Components/EditableTextBox.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
@@ -26,6 +32,8 @@
 #include "Serialization/JsonSerializer.h"
 #include "UObject/UnrealType.h"
 
+
+int32 MigrateAtlasFileParity(const TArray<UBlueprint*>& Blueprints);
 
 namespace AtlasWidgetMigration
 {
@@ -295,6 +303,79 @@ static int32 MigrateHistoryFilter(const TArray<UBlueprint*>& Blueprints)
     return 0;
 }
 
+static int32 AddFileActions(const TArray<UBlueprint*>& Blueprints)
+{
+    TArray<UWidgetBlueprint*> Targets;
+    TMap<FString, FString> Backups;
+    const FString BackupRoot = FPaths::ProjectSavedDir() / TEXT("NativeWidgetBackups") / FGuid::NewGuid().ToString(EGuidFormats::Digits);
+    IFileManager::Get().MakeDirectory(*BackupRoot, true);
+    for (const TCHAR* Name : {TEXT("EUW_FilePicker"), TEXT("EUW_ParameterRow")})
+    {
+        auto* BP = LoadObject<UWidgetBlueprint>(nullptr, *(FString(TEXT("/AtlasWorkflow/Core/UI/Editor/Utilities/")) + Name + TEXT(".") + Name));
+        if (!BP || !BP->WidgetTree || !BP->WidgetTree->RootWidget) return 60;
+        const bool bPicker = BP->ParentClass->IsChildOf(UAtlasFilePickerWidget::StaticClass());
+        if (!bPicker && !BP->ParentClass->IsChildOf(UAtlasParameterRowWidget::StaticClass())) return 61;
+        if (BP->WidgetTree->FindWidget(bPicker ? TEXT("AssetIdInput") : TEXT("FileActions"))) continue;
+        const FString File = FPackageName::LongPackageNameToFilename(BP->GetOutermost()->GetName(), FPackageName::GetAssetPackageExtension());
+        const FString Backup = BackupRoot / FPaths::GetCleanFilename(File);
+        if (IFileManager::Get().Copy(*Backup, *File) != COPY_OK) return 62;
+        Backups.Add(File, Backup);
+        UWidgetTree* Tree = BP->WidgetTree;
+        UWidget* OriginalRoot = Tree->RootWidget;
+        auto* Root = Tree->ConstructWidget<UVerticalBox>(UVerticalBox::StaticClass(), bPicker ? TEXT("FilePickerRoot") : TEXT("ParameterRowRoot"));
+        Root->SetFlags(RF_Transactional); Tree->RootWidget = Root;
+        Root->AddChildToVerticalBox(OriginalRoot);
+        if (bPicker)
+        {
+            auto* Input = Tree->ConstructWidget<UEditableTextBox>(UEditableTextBox::StaticClass(), TEXT("AssetIdInput"));
+            Input->SetFlags(RF_Transactional); Input->bIsVariable = true;
+            Input->SetHintText(FText::FromString(TEXT("Paste existing Atlas asset ID")));
+            Input->SetToolTipText(FText::FromString(TEXT("Reuse an uploaded file by its UUID, without uploading it again. Choose a local file to switch back.")));
+            Root->AddChildToVerticalBox(Input)->SetPadding(FMargin(0, 4, 0, 0));
+        }
+        else
+        {
+            auto* Actions = Tree->ConstructWidget<UHorizontalBox>(UHorizontalBox::StaticClass(), TEXT("FileActions"));
+            Actions->SetFlags(RF_Transactional); Actions->bIsVariable = true;
+            Root->AddChildToVerticalBox(Actions)->SetPadding(FMargin(0, 4, 0, 0));
+            const TCHAR* Names[] = {TEXT("ButtonSaveOutput"), TEXT("ButtonRevealOutput"), TEXT("ButtonCopyAssetId")};
+            const TCHAR* Labels[] = {TEXT("Save As"), TEXT("Reveal"), TEXT("Copy asset ID")};
+            for (int32 Index = 0; Index < 3; ++Index)
+            {
+                auto* Button = Tree->ConstructWidget<UButton>(UButton::StaticClass(), Names[Index]);
+                Button->SetFlags(RF_Transactional); Button->bIsVariable = true;
+                auto* Label = Tree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass(), FName(*(FString(Names[Index]) + TEXT("Label"))));
+                Label->SetFlags(RF_Transactional); Label->SetText(FText::FromString(Labels[Index]));
+                Button->AddChild(Label); Actions->AddChildToHorizontalBox(Button);
+            }
+        }
+        FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(BP);
+        FBlueprintEditorUtils::UpdateTransactionalFlags(BP);
+        FKismetEditorUtilities::CompileBlueprint(BP);
+        if (BP->Status == BS_Error) return 63;
+        Targets.Add(BP);
+    }
+    for (UBlueprint* BP : Blueprints)
+    {
+        FKismetEditorUtilities::CompileBlueprint(BP);
+        if (BP->Status == BS_Error) return 64;
+    }
+    FSavePackageArgs Args; Args.TopLevelFlags = RF_Public | RF_Standalone; Args.SaveFlags = SAVE_NoError;
+    for (UWidgetBlueprint* BP : Targets)
+    {
+        const FString File = FPackageName::LongPackageNameToFilename(BP->GetOutermost()->GetName(), FPackageName::GetAssetPackageExtension());
+        if (!UPackage::SavePackage(BP->GetOutermost(), BP, *File, Args))
+        {
+            for (const auto& Pair : Backups)
+                if (IFileManager::Get().Copy(*Pair.Key, *Pair.Value, true) != COPY_OK)
+                    UE_LOG(LogTemp, Error, TEXT("Restore original from %s"), *Pair.Value);
+            return 65;
+        }
+    }
+    UE_LOG(LogTemp, Display, TEXT("File controls added to %d assets; %d consumers compiled. Backups: %s"), Targets.Num(), Blueprints.Num(), *BackupRoot);
+    return 0;
+}
+
 static int32 RepairEditorMetadata(const TArray<UBlueprint*>& Blueprints, bool bVerifyOnly)
 {
     TArray<UBlueprint*> Repairs;
@@ -350,12 +431,14 @@ static int32 RepairEditorMetadata(const TArray<UBlueprint*>& Blueprints, bool bV
 int32 UAtlasWidgetMigrationCommandlet::Main(const FString& Params)
 {
 	FString Output;
+	const bool bFileParity = FParse::Param(*Params, TEXT("FileParity"));
+	const bool bFileActions = FParse::Param(*Params, TEXT("AddFileActions"));
 	const bool bFilter = FParse::Param(*Params, TEXT("MigrateHistoryFilter"));
 	const bool bRepair = FParse::Param(*Params, TEXT("RepairEditorMetadata"));
 	const bool bVerify = FParse::Param(*Params, TEXT("VerifyEditorMetadata"));
 	const bool bMigrate = FParse::Param(*Params, TEXT("Migrate"));
 	const bool bMigrateWorkflow = FParse::Param(*Params, TEXT("MigrateWorkflow"));
-	if (!FParse::Value(*Params, TEXT("Output="), Output) && !bMigrate && !bMigrateWorkflow && !bRepair && !bVerify && !bFilter) return 1;
+	if (!FParse::Value(*Params, TEXT("Output="), Output) && !bMigrate && !bMigrateWorkflow && !bRepair && !bVerify && !bFilter && !bFileActions && !bFileParity) return 1;
 	FAssetRegistryModule& Registry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
 	Registry.Get().ScanPathsSynchronous({TEXT("/AtlasWorkflow/Core/UI")}, true);
 	TArray<FAssetData> Assets;
@@ -429,6 +512,8 @@ int32 UAtlasWidgetMigrationCommandlet::Main(const FString& Params)
 		}
 		Entry->SetArrayField(TEXT("graphs"), JsonGraphs); Result.Add(MakeShared<FJsonValueObject>(Entry));
 	}
+	if (bFileParity) return MigrateAtlasFileParity(LoadedBlueprints);
+	if (bFileActions) return AtlasWidgetMigration::AddFileActions(LoadedBlueprints);
 	if (bFilter) return AtlasWidgetMigration::MigrateHistoryFilter(LoadedBlueprints);
 	if (bRepair || bVerify) return AtlasWidgetMigration::RepairEditorMetadata(LoadedBlueprints, bVerify);
 	if (bMigrate) return AtlasWidgetMigration::Migrate(LoadedBlueprints);

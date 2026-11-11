@@ -387,6 +387,7 @@ private:
 	bool bPreparingUpload = false;
 	void PrepareNextUpload();
 #if WITH_DEV_AUTOMATION_TESTS
+	friend struct FAtlasArrayTestAccess;
 	friend struct FAtlasNonBatchTestAccess;
 	friend struct FAtlasCancellationTestAccess;
 	friend struct FAtlasUploadTestAccess;

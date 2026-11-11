@@ -46,6 +46,26 @@ enum class EAtlasValueType : uint8
 	Json UMETA(DisplayName = "JSON")
 };
 
+/** One ordered file-list item. Type/format belong to the parent parameter. */
+USTRUCT(BlueprintType)
+struct ATLASSDK_API FAtlasFileReference
+{
+    GENERATED_BODY()
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Atlas|File") FString FileId;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Atlas|File") FString FilePath;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Atlas|File") FString FileName;
+    UPROPERTY(BlueprintReadWrite, Category="Atlas|File") TArray<uint8> FileData;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Atlas|File") FString SourceKind;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Atlas|File") FString SourceAssetPath;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Atlas|File") FString SourceOrigin;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Atlas|File") FString OriginalFileName;
+    UPROPERTY(BlueprintReadOnly, Category="Atlas|File") FString Warning;
+    FAtlasFileReference WithoutFileData() const
+    {
+        FAtlasFileReference Copy; Copy.FileId=FileId; Copy.FilePath=FilePath; Copy.FileName=FileName; Copy.Warning=Warning; Copy.SourceKind=SourceKind; Copy.SourceAssetPath=SourceAssetPath; Copy.SourceOrigin=SourceOrigin; Copy.OriginalFileName=OriginalFileName; return Copy;
+    }
+};
+
 /**
  * Variant container that can hold any Atlas workflow value type.
  * Used for both inputs and outputs in dynamic/parametric workflows.
@@ -66,6 +86,30 @@ struct ATLASSDK_API FAtlasValue
 	/** The type of value stored in this container */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Atlas|Value")
 	EAtlasValueType Type = EAtlasValueType::None;
+
+    /** True distinguishes an empty file list from a missing scalar. Only Image/Mesh lists are supported. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Atlas|Value") bool bIsArray = false;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Atlas|Value") TArray<FAtlasFileReference> FileItems;
+
+    template<typename Visitor> void VisitFile(int32 Index, Visitor&& Visit)
+    {
+        if (bIsArray) { if (FileItems.IsValidIndex(Index)) Visit(FileItems[Index]); }
+        else if (Index == INDEX_NONE) Visit(*this);
+    }
+    template<typename Visitor> void ForEachFile(Visitor&& Visit)
+    {
+        if (bIsArray) { for (int32 I=0; I<FileItems.Num(); ++I) Visit(FileItems[I], I); }
+        else if (IsFileType() || IsFileId()) Visit(*this, INDEX_NONE);
+    }
+    template<typename Visitor> void ForEachFile(Visitor&& Visit) const
+    {
+        if (bIsArray) { for (int32 I=0; I<FileItems.Num(); ++I) Visit(FileItems[I], I); }
+        else if (IsFileType() || IsFileId()) Visit(*this, INDEX_NONE);
+    }
+    static FAtlasValue MakeFileList(EAtlasValueType ItemType, const TArray<FAtlasFileReference>& Items)
+    {
+        FAtlasValue Result; Result.Type=ItemType; Result.bIsArray=true; Result.FileItems=Items; return Result;
+    }
 
 	/** String value (when Type == String) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Atlas|Value")
@@ -99,17 +143,33 @@ struct ATLASSDK_API FAtlasValue
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Atlas|Value")
 	FString FileName;
 
+	/** Platform type/format retained independently of the generic transport family. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Atlas|Value")
+	FString OriginalType;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Atlas|Value")
+	FString FileFormat;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Atlas|File") FString SourceKind;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Atlas|File") FString SourceAssetPath;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Atlas|File") FString SourceOrigin;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Atlas|File") FString OriginalFileName;
+
 	/** JSON string content (when Type == Json) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Atlas|Value")
 	FString JsonValue;
 
 	/** Copy reference/scalar metadata without allocating another whole-file buffer. */
+    /** History-only marker: this parameter was omitted from the request. */
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Atlas") bool bOmitted=false;
+
 	FAtlasValue WithoutFileData() const
 	{
 		FAtlasValue Copy;
 		Copy.Type = Type; Copy.StringValue = StringValue; Copy.NumberValue = NumberValue;
 		Copy.IntValue = IntValue; Copy.BoolValue = BoolValue; Copy.FilePath = FilePath;
 		Copy.FileId = FileId; Copy.FileName = FileName; Copy.JsonValue = JsonValue;
+		Copy.bOmitted=bOmitted; Copy.OriginalType = OriginalType; Copy.FileFormat = FileFormat; Copy.bIsArray=bIsArray; Copy.SourceKind=SourceKind; Copy.SourceAssetPath=SourceAssetPath; Copy.SourceOrigin=SourceOrigin; Copy.OriginalFileName=OriginalFileName;
+        for (const auto& Item : FileItems) Copy.FileItems.Add(Item.WithoutFileData());
 		return Copy;
 	}
 
@@ -381,6 +441,7 @@ struct ATLASSDK_API FAtlasValue
 	/** Get a human-readable string representation of this value */
 	FString ToString() const
 	{
+        if (bIsArray) return FString::Printf(TEXT("[%d files]"), FileItems.Num());
 		switch (Type)
 		{
 		case EAtlasValueType::None:

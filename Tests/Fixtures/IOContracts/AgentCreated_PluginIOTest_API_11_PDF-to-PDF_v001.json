@@ -1,0 +1,22 @@
+{
+  "version": "0.2",
+  "api_id": "17f5cfa4-71a8-429e-9a69-6104033c6242",
+  "base_url": "https://api.dev.atlas.design",
+  "name": "AgentCreated | Plugin IO Test | API | 11 PDF to PDF | v001",
+  "inputs": [
+    {
+      "id": "pdf_input",
+      "label": "pdf_input",
+      "type": "pdf",
+      "required": true,
+      "default_value": null
+    }
+  ],
+  "outputs": [
+    {
+      "id": "pdf_output",
+      "type": "pdf",
+      "format": "pdf"
+    }
+  ]
+}

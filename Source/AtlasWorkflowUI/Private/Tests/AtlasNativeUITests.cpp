@@ -1,6 +1,7 @@
 #include "Misc/AutomationTest.h"
 #if WITH_DEV_AUTOMATION_TESTS
 #include "AtlasNativeInputWidgets.h"
+#include "AtlasFileWidgets.h"
 #include "AtlasNativeWorkflowWidgets.h"
 #include "AtlasHistoryFilterWidget.h"
 #include "AtlasEditorSubsystem.h"
@@ -18,6 +19,7 @@
 #include "Components/VerticalBox.h"
 #include "Components/Button.h"
 #include "Components/EditableText.h"
+#include "Components/EditableTextBox.h"
 #include "Components/Image.h"
 #include "AtlasNativeUITestObserver.h"
 #include "Components/CheckBox.h"
@@ -65,8 +67,9 @@ bool FAtlasNativeUIInputs::RunTest(const FString&)
     TestEqual(TEXT("Blueprint caller reads native value"), Out->ContainerPtrToValuePtr<FAtlasValue>(Params.GetStructMemory())->StringValue, FString(TEXT("Edited value")));
     TStrongObjectPtr<UAtlasNativeUITestObserver> Observer(NewObject<UAtlasNativeUITestObserver>());
     Field->OnInputUpdated.AddDynamic(Observer.Get(), &UAtlasNativeUITestObserver::Changed);
-    FAtlasParameterDef Def; Def.Name = TEXT("flag"); Def.Type = EAtlasValueType::Boolean;
+    FAtlasParameterDef Def; Def.Name = TEXT("flag"); Def.Type = EAtlasValueType::Boolean; Def.bHasDefaultValue=true; Def.DefaultValue=TEXT("true");
     Field->ConfigureInput(Def);
+    TestEqual(TEXT("Boolean default label matches value"),Field->BooleanValueLabel->GetText().ToString(),FString(TEXT("True")));
     auto* Check = Cast<UCheckBox>(Field->GetWidgetFromName(TEXT("CheckBox_Bool")));
     Check->SetIsChecked(true);
     Field->CollectValue(Name, Value);
@@ -104,6 +107,66 @@ bool FAtlasNativeUIInputs::RunTest(const FString&)
     SlateWidget.Reset(); Field->ReleaseSlateResources(true);
     return true;
 }
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAtlasSingleFiles, "Atlas.NativeUI.SingleFiles",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FAtlasSingleFiles::RunTest(const FString&)
+{
+    UWorld* World = GEditor->GetEditorWorldContext().World();
+    UClass* InputClass = LoadClass<UAtlasInputFieldWidget>(nullptr, TEXT("/AtlasWorkflow/Core/UI/Editor/Utilities/EUW_InputField.EUW_InputField_C"));
+    UClass* RowClass = LoadClass<UAtlasParameterRowWidget>(nullptr, TEXT("/AtlasWorkflow/Core/UI/Editor/Utilities/EUW_ParameterRow.EUW_ParameterRow_C"));
+    if (!TestNotNull(TEXT("Input class"), InputClass) || !TestNotNull(TEXT("Row class"), RowClass)) return false;
+    TStrongObjectPtr<UAtlasInputFieldWidget> Field(CreateWidget<UAtlasInputFieldWidget>(World, InputClass));
+    FAtlasParameterDef Def; Def.Name = TEXT("context"); Def.Type = EAtlasValueType::File;
+    Def.OriginalType = TEXT("agent_context"); Def.Format = TEXT("atlas-context.json"); Def.AllowedExtensions = {Def.Format};
+    Def.bHasDefaultValue = true; Def.DefaultValue = TEXT("a439f5b9-9b37-4a52-8d9d-441c142291c5");
+    Field->currentDefParameter = Def; Field->defaultValue = Def.GetDefaultValueAsAtlasValue();
+    TSharedPtr<SWidget> Slate = Field->TakeWidget();
+    FString Name; FAtlasValue Value; Field->CollectValue(Name, Value);
+    TestEqual(TEXT("File default reaches picker"), Value.FileId, Def.DefaultValue);
+    TestTrue(TEXT("Existing ID avoids local upload"), Value.FilePath.IsEmpty());
+    TestEqual(TEXT("Original type retained"), Value.OriginalType, Def.OriginalType);
+    auto* Picker = Cast<UAtlasFilePickerWidget>(Field->GetWidgetFromName(TEXT("EUW_FilePicker_Image")));
+    auto* Id = Picker ? Cast<UEditableTextBox>(Picker->GetWidgetFromName(TEXT("AssetIdInput"))) : nullptr;
+    if (!TestNotNull(TEXT("Visible asset ID control exists"), Id)) return false;
+    Id->SetText(FText::FromString(TEXT("invalid"))); Id->OnTextChanged.Broadcast(Id->GetText()); Field->CollectValue(Name, Value);
+    TestEqual(TEXT("Rejected ID preserves committed selection"), Value.FileId, Def.DefaultValue);
+    Id->SetText(FText::FromString(Def.DefaultValue)); Id->OnTextChanged.Broadcast(Id->GetText()); Field->CollectValue(Name, Value);
+    TestEqual(TEXT("Typing restores valid ID"), Value.FileId, Def.DefaultValue);
+    const FString Root = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / TEXT("Automation/SingleFiles") / FGuid::NewGuid().ToString(EGuidFormats::Digits));
+    IFileManager::Get().MakeDirectory(*Root, true);
+    const FString Source = Root / TEXT("context.atlas-context.json");
+    const FString Contents = TEXT("{\"conversation\":[],\"fixture\":true}");
+    TestTrue(TEXT("Create file fixture"), FFileHelper::SaveStringToFile(Contents, *Source));
+    Picker->SelectFile(Source); Field->CollectValue(Name, Value);
+    TestEqual(TEXT("Compound suffix allowed"), Value.FilePath, Source);
+    TestTrue(TEXT("Local selection clears ID"), Value.FileId.IsEmpty());
+    Picker->ConfigurePicker(EAtlasValueType::Image, {TEXT("exr")});
+    auto* FromProject = Picker->GetWidgetFromName(TEXT("EditorUtilityButton_FromProject"));
+    TestTrue(TEXT("EXR does not offer PNG project export"), FromProject->GetVisibility() == ESlateVisibility::Collapsed);
+    auto* Settings = GetMutableDefault<UAtlasSDKSettings>(); const auto Old = Settings->OutputFolder;
+    Settings->OutputFolder.Path = Root;
+    ON_SCOPE_EXIT { Settings->OutputFolder = Old; };
+    Value.FileId = Def.DefaultValue; Value.FileName = FPaths::GetCleanFilename(Source);
+    FAtlasJobHistoryRecord Record; Record.JobId = FGuid::NewGuid(); Record.ApiId = TEXT("single-files");
+    Record.StartedAt = Record.CompletedAt = FDateTime::UtcNow(); Record.Outputs.Values.Add(TEXT("context"), Value);
+    Record.OutputFilePaths.Add(TEXT("context"), Source);
+    TStrongObjectPtr<UAtlasParameterRowWidget> Row(CreateWidget<UAtlasParameterRowWidget>(World, RowClass));
+    Row->ConfigureParameter(false, TEXT("context"), Value, true, Record);
+    TSharedPtr<SWidget> RowSlate = Row->TakeWidget();
+    TestFalse(TEXT("Context has no native importer"), Row->CanImportOutput());
+    auto* Actions = Row->GetWidgetFromName(TEXT("FileActions"));
+    if (!TestNotNull(TEXT("Designer-owned file actions exist"), Actions)) return false;
+    TestTrue(TEXT("Legacy actions hidden behind shared card"), Actions->GetVisibility() == ESlateVisibility::Collapsed);
+    TestTrue(TEXT("Shared output card reachable"),Row->FilePresentation && Row->FilePresentation->GetVisibility()==ESlateVisibility::Visible);
+    TestTrue(TEXT("Copy original file"), Row->SaveOutputCopy(Root / TEXT("copy.atlas-context.json")));
+    TestFalse(TEXT("Existing destination protected"), Row->SaveOutputCopy(Root / TEXT("copy.atlas-context.json")));
+    TArray<uint8> Original, Copy;
+    FFileHelper::LoadFileToArray(Original, *Source); FFileHelper::LoadFileToArray(Copy, *(Root / TEXT("copy.atlas-context.json")));
+    TestTrue(TEXT("Original bytes preserved"), Original == Copy);
+    RowSlate.Reset(); Row->ReleaseSlateResources(true); Slate.Reset(); Field->ReleaseSlateResources(true);
+    return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAtlasNativeUIWorkflow, "Atlas.NativeUI.WorkflowCoordination",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 bool FAtlasNativeUIWorkflow::RunTest(const FString&)
@@ -205,7 +268,9 @@ bool FAtlasNativeUIDesigner::RunTest(const FString&)
             && BP->ParentClass != UAtlasParameterRowWidget::StaticClass()
             && BP->ParentClass != UAtlasInputFieldWidget::StaticClass()
             && BP->ParentClass != UAtlasFilePickerWidget::StaticClass()
-            && BP->ParentClass != UAtlasHistoryFilterWidget::StaticClass()) continue;
+            && BP->ParentClass != UAtlasHistoryFilterWidget::StaticClass()
+            && BP->ParentClass != UAtlasFileCard::StaticClass()
+            && BP->ParentClass != UAtlasFilePanel::StaticClass()) continue;
         // Use the Designer preview factory, then exercise incomplete bindings as seen during
         // Blueprint reinstancing. Normal CreateWidget/reconstruction did not cover this case.
         FWidgetBlueprintEditorUtils::FCreateWidgetFromBlueprintParams Params;
@@ -217,7 +282,7 @@ bool FAtlasNativeUIDesigner::RunTest(const FString&)
         // Reinstancing can clear some or all bindings before the old Slate preview is released.
         // Explicitly reproduce that state for all four bases, including partially initialized objects.
         for (TFieldIterator<FObjectPropertyBase> It(Preview->GetClass()); It; ++It)
-            if (It->HasMetaData(TEXT("BindWidget"))) It->SetObjectPropertyValue_InContainer(Preview, nullptr);
+            if (It->HasMetaData(TEXT("BindWidget")) || It->HasMetaData(TEXT("BindWidgetOptional"))) It->SetObjectPropertyValue_InContainer(Preview, nullptr);
         if (auto* RunProperty = FindFProperty<FObjectPropertyBase>(Preview->GetClass(), TEXT("ButtonRunWorkflow")))
             TestNull(TEXT("Exercises the null binding reported by the crash"), RunProperty->GetObjectPropertyValue_InContainer(Preview));
         // Dropping the Slate preview calls NativeDestruct even though NativeConstruct never ran.
@@ -231,7 +296,7 @@ bool FAtlasNativeUIDesigner::RunTest(const FString&)
         FWidgetBlueprintEditorUtils::DestroyUserWidget(Preview);
         ++Previewed;
     }
-    TestEqual(TEXT("All five migrated widgets previewed, compiled and reopened"), Previewed, 5);
+    TestEqual(TEXT("All seven native widgets previewed, compiled and reopened"), Previewed, 7);
     return true;
 }
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAtlasNativeUIFilters, "Atlas.NativeUI.HistoryFilters",

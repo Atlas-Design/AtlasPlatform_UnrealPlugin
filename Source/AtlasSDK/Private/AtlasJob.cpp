@@ -22,6 +22,30 @@
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 
+namespace
+{
+FString ArrayTransferKey(const TMap<FString, FAtlasValue>& Values, const FString& Name, int32 Index)
+{
+    FString Key=FString::Printf(TEXT("@AtlasList/%d:%s/%d"), Name.Len(), *Name, Index);
+    while (Values.Contains(Key)) Key += TEXT("#");
+    return Key;
+}
+FString FileArchiveName(const FString& Prefix, const FString& Name, int32 Index, const FString& Extension)
+{
+    const FString Base=Prefix + AtlasArchive::Component(Name);
+    return Index == INDEX_NONE ? Base + TEXT(".") + Extension
+        : Base / FString::Printf(TEXT("Item_%06d.%s"), Index, *Extension);
+}
+FString SafeFileSuffix(const FString& Filename)
+{
+    if (Filename.EndsWith(TEXT(".atlas-context.json"), ESearchCase::IgnoreCase)) return TEXT("atlas-context.json");
+    const FString Extension = FPaths::GetExtension(Filename).ToLower();
+    if (Extension.IsEmpty() || Extension.Len() > 12) return TEXT("bin");
+    for (TCHAR Ch : Extension) if (!FChar::IsAlnum(Ch)) return TEXT("bin");
+    return Extension;
+}
+}
+
 UAtlasJob::UAtlasJob()
 	: State(EAtlasJobState::Pending)
 	, Phase(EAtlasJobPhase::Initializing)
@@ -195,24 +219,22 @@ void UAtlasJob::ArchiveInputFilesToRunFolder()
 {
 	UAtlasOutputManager* OutputManager = NewObject<UAtlasOutputManager>(this);
 	const FAtlasJobFolderInfo Folder = OutputManager->GetJobFolderInfo(this);
-	struct FInputCopy { FString Name, Source, Destination; TArray<uint8> Bytes; };
+	struct FInputCopy { FString Name, Source, Destination; TArray<uint8> Bytes; int32 Index=INDEX_NONE; };
 	TArray<FInputCopy> Copies;
-	for (const auto& Pair : Inputs.Values)
-	{
-		const FAtlasValue& Value = Pair.Value;
-		if (!Value.IsFileType() || !Value.FileId.IsEmpty()) continue;
-		FString Extension = FPaths::GetExtension(Value.FilePath.IsEmpty() ? Value.FileName : Value.FilePath).ToLower();
-		bool bSafeExtension = !Extension.IsEmpty() && Extension.Len() <= 12;
-		for (TCHAR Ch : Extension) bSafeExtension &= FChar::IsAlnum(Ch);
-		if (!bSafeExtension) Extension = TEXT("bin");
-		const FString Destination = Folder.InputsDiskPath / (TEXT("Input_") + AtlasArchive::Component(Pair.Key) + TEXT(".") + Extension);
-		if (!AtlasArchive::IsContained(UAtlasSDKSettings::Get()->GetOutputFolderPath(), Destination))
-		{
-			FailWithError(FAtlasError(EAtlasErrorCode::FileError, TEXT("Unsafe input archive destination")));
-			return;
-		}
-		Copies.Add({Pair.Key, Value.FilePath, Destination, Value.FileData});
-	}
+    bool bSafe=true;
+    for (const auto& Pair : Inputs.Values)
+    {
+        Pair.Value.ForEachFile([&](const auto& Value, int32 Index)
+        {
+            if (!Value.FileId.IsEmpty()) return;
+            const FString Extension=SafeFileSuffix(Value.FilePath.IsEmpty() ? Value.FileName : Value.FilePath);
+            const FString Destination=Folder.InputsDiskPath / FileArchiveName(TEXT("Input_"), Pair.Key, Index, Extension);
+            if (!AtlasArchive::IsContained(UAtlasSDKSettings::Get()->GetOutputFolderPath(), Destination)) { bSafe=false; return; }
+            Copies.Add({Pair.Key, Value.FilePath, Destination, Value.FileData, Index});
+        });
+    }
+    if (!bSafe) { FailWithError(FAtlasError(EAtlasErrorCode::FileError, TEXT("Unsafe input archive destination"))); return; }
+
 	if (Copies.IsEmpty()) { ContinueExecution(); return; }
 	const TWeakObjectPtr<UAtlasJob> WeakThis(this);
 	AtlasFileWork::Enqueue([WeakThis, Copies = MoveTemp(Copies)]() mutable
@@ -237,9 +259,10 @@ void UAtlasJob::ArchiveInputFilesToRunFolder()
 			{
 				if (FAtlasValue* Value = Job->Inputs.Values.Find(Copy.Name))
 				{
-					Value->FilePath = Copy.Destination;
-					Value->FileName = FPaths::GetCleanFilename(Copy.Destination);
-					Value->FileData.Empty();
+					Value->VisitFile(Copy.Index, [&](auto& Item) {
+                        if (Item.OriginalFileName.IsEmpty()) Item.OriginalFileName=FPaths::GetCleanFilename(Copy.Source);
+                        Item.FilePath=Copy.Destination; Item.FileName=FPaths::GetCleanFilename(Copy.Destination); Item.FileData.Empty();
+                    });
 				}
 			}
 			Job->ContinueExecution();
@@ -249,43 +272,15 @@ void UAtlasJob::ArchiveInputFilesToRunFolder()
 
 void UAtlasJob::ScanInputsForUploads()
 {
-	FilesToUpload.Empty();
-
-	for (const auto& Pair : Inputs.Values)
-	{
-		const FString& InputName = Pair.Key;
-		const FAtlasValue& Value = Pair.Value;
-
-		// Check if this input is a file type that needs uploading
-		if (Value.Type == EAtlasValueType::Image || 
-			Value.Type == EAtlasValueType::Mesh || 
-			Value.Type == EAtlasValueType::Audio ||
-			Value.Type == EAtlasValueType::File)
-		{
-			// If it already has a FileId, no need to upload
-			if (!Value.FileId.IsEmpty())
-			{
-				UploadedFileIds.Add(InputName, Value.FileId);
-				UE_LOG(LogTemp, Log, TEXT("AtlasJob[%s] input '%s' already has FileId: %s"),
-					*JobId.ToString(EGuidFormats::DigitsWithHyphens), *InputName, *Value.FileId);
-			}
-			// If it has a file path, we need to upload
-			else if (!Value.FilePath.IsEmpty())
-			{
-				FilesToUpload.Add(InputName, Value.FilePath);
-				UE_LOG(LogTemp, Log, TEXT("AtlasJob[%s] input '%s' needs upload from: %s"),
-					*JobId.ToString(EGuidFormats::DigitsWithHyphens), *InputName, *Value.FilePath);
-			}
-			else
-			{
-				UE_LOG(LogTemp, Warning, TEXT("AtlasJob[%s] file input '%s' has no FilePath or FileId"),
-					*JobId.ToString(EGuidFormats::DigitsWithHyphens), *InputName);
-			}
-		}
-	}
-
-	UE_LOG(LogTemp, Log, TEXT("AtlasJob[%s] found %d files to upload, %d already have FileIds"),
-		*JobId.ToString(EGuidFormats::DigitsWithHyphens), FilesToUpload.Num(), UploadedFileIds.Num());
+    FilesToUpload.Empty(); UploadedFileIds.Empty(); UploadTargets.Empty();
+    for (const auto& Pair : Inputs.Values)
+        Pair.Value.ForEachFile([&](const auto& Item, int32 Index)
+        {
+            const FString Key=Index == INDEX_NONE ? Pair.Key : ArrayTransferKey(Inputs.Values, Pair.Key, Index);
+            UploadTargets.Add(Key, {Pair.Key, Index});
+            if (!Item.FileId.IsEmpty()) UploadedFileIds.Add(Key, Item.FileId);
+            else if (!Item.FilePath.IsEmpty()) FilesToUpload.Add(Key, Item.FilePath);
+        });
 }
 
 void UAtlasJob::StartUploadPhase()
@@ -340,6 +335,9 @@ void UAtlasJob::OnFileUploadComplete(const FGuid& OperationId, const FString& Fi
 		*JobId.ToString(EGuidFormats::DigitsWithHyphens), *InputName, *FileId);
 
 	UploadedFileIds.Add(InputName, FileId);
+    const FFileTarget Target=UploadTargets.Contains(InputName) ? UploadTargets[InputName] : FFileTarget{InputName, INDEX_NONE};
+    if (auto* Value=Inputs.Values.Find(Target.Parameter))
+        Value->VisitFile(Target.Index, [&](auto& Item) { Item.FileId=FileId; });
 	UploadOperations.Remove(OperationId);
 	UploadsCompleted++;
 
@@ -482,6 +480,21 @@ UAtlasJsonObject* UAtlasJob::BuildExecutePayload()
 	{
 		const FString& InputName = Pair.Key;
 		const FAtlasValue& Value = Pair.Value;
+
+        if (Value.bIsArray)
+        {
+            if (!Value.IsFileType()) return nullptr;
+            TArray<TSharedPtr<FJsonValue>> Items;
+            for (int32 I=0; I<Value.FileItems.Num(); ++I)
+            {
+                const FString* Uploaded=UploadedFileIds.Find(ArrayTransferKey(Inputs.Values, InputName, I));
+                const FString Id=Uploaded ? *Uploaded : Value.FileItems[I].FileId;
+                if (Id.IsEmpty()) return nullptr;
+                Items.Add(MakeShared<FJsonValueString>(Id));
+            }
+            Payload->GetJsonObject()->SetArrayField(InputName, Items);
+            continue;
+        }
 
 		switch (Value.Type)
 		{
@@ -939,6 +952,9 @@ bool UAtlasJob::ParseStatusResponse(UAtlasJsonObject* ResponseJson)
 		|| !(*Result)->TryGetObjectField(TEXT("outputs"), JsonOutputs) || !JsonOutputs || !JsonOutputs->IsValid()) return false;
 	FAtlasWorkflowOutputs Parsed;
 	TMap<FString, FString> Downloads;
+    TMap<FString, FFileTarget> Targets;
+    TMap<FString, FAtlasValue> OutputNames;
+    for (const auto& Def : GetExecutionWorkflow()->GetSchema().Outputs) OutputNames.Add(Def.Name, FAtlasValue());
 	for (const FAtlasParameterDef& Def : GetExecutionWorkflow()->GetSchema().Outputs)
 	{
 		const TSharedPtr<FJsonValue>* Field = (*JsonOutputs)->Values.Find(Def.Name);
@@ -946,6 +962,26 @@ bool UAtlasJob::ParseStatusResponse(UAtlasJsonObject* ResponseJson)
 		const auto& Json = *Field;
 		FAtlasValue Value;
 		Value.Type = Def.Type;
+		Value.OriginalType = Def.OriginalType; Value.FileFormat = Def.Format;
+        if (Def.bIsArray)
+        {
+            if (!Def.IsFileType()) return false;
+            const TArray<TSharedPtr<FJsonValue>>* Items=nullptr;
+            if (!Json->TryGetArray(Items)) return false;
+            Value.bIsArray=true;
+            for (int32 I=0; I<Items->Num(); ++I)
+            {
+                FAtlasFileReference Item;
+                if (!(*Items)[I].IsValid() || !(*Items)[I]->TryGetString(Item.FileId) || Item.FileId.IsEmpty()) return false;
+                Item.FileName=FString::Printf(TEXT("Item_%06d.%s"), I, *SafeFileSuffix(TEXT("file.")+Def.Format));
+                Value.FileItems.Add(Item);
+                const FString Key=ArrayTransferKey(OutputNames, Def.Name, I);
+                Downloads.Add(Key, Item.FileId); Targets.Add(Key, {Def.Name, I});
+            }
+            Parsed.Values.Add(Def.Name, MoveTemp(Value));
+            continue;
+        }
+
 		switch (Def.Type)
 		{
 		case EAtlasValueType::String:
@@ -982,9 +1018,12 @@ bool UAtlasJob::ParseStatusResponse(UAtlasJsonObject* ResponseJson)
 				Extension.RemoveFromStart(TEXT("."));
 				bool bSafe = !Extension.IsEmpty() && Extension.Len() <= 12;
 				for (TCHAR Ch : Extension) bSafe &= FChar::IsAlnum(Ch);
+				// Only the documented context suffix may contain an internal dot.
+				bSafe |= Extension == TEXT("atlas-context.json");
 				Value.FileName = TEXT("Output_") + AtlasArchive::Component(Def.Name) + TEXT(".") + (bSafe ? Extension : TEXT("bin"));
 			}
 			Downloads.Add(Def.Name, Value.FileId);
+            Targets.Add(Def.Name, {Def.Name, INDEX_NONE});
 			break;
 		default: return false;
 		}
@@ -992,6 +1031,7 @@ bool UAtlasJob::ParseStatusResponse(UAtlasJsonObject* ResponseJson)
 	}
 	Outputs = MoveTemp(Parsed);
 	FilesToDownload = MoveTemp(Downloads);
+    DownloadTargets=MoveTemp(Targets);
 	return true;
 }
 
@@ -1016,79 +1056,137 @@ void UAtlasJob::StartDownloadPhase()
 	FileManager->OnDownloadComplete.AddDynamic(this, &UAtlasJob::HandleDownloadComplete);
 	FileManager->OnDownloadFailed.AddDynamic(this, &UAtlasJob::HandleDownloadFailed);
 
-	{
-		TGuardValue<bool> StartingDownloads(bStartingDownloads, true);
-		for (const auto& Pair : FilesToDownload)
-		{
-			if (bCancellationRequested || IsFinished()) return;
-			const FString OutputName = Pair.Key;
-			const FGuid OperationId = FGuid::NewGuid();
-			// Record ownership before any synchronous failure/completion can call back.
-			DownloadOperations.Add(OperationId, OutputName);
-			const FGuid Started = FileManager->DownloadFileWithOperationId(GetExecutionWorkflow(), Pair.Value, OperationId);
-			if (!Started.IsValid() && DownloadOperations.Contains(OperationId))
-			{
-				OnFileDownloadFailed(OperationId, TEXT("Download could not start"), 0, OutputName);
-			}
-		}
-	}
+    FilesToDownload.GetKeys(DownloadQueue); NextDownload=0; PendingArrayWrites=0; RetainedArrayBytes=0;
+    PumpDownloads();
+}
 
-	UpdateOverallProgress();
-	CheckDownloadPhaseComplete();
+void UAtlasJob::PumpDownloads()
+{
+    if (bStartingDownloads || bFinishing || bCancellationRequested || IsFinished()) return;
+    {
+        TGuardValue<bool> Starting(bStartingDownloads, true);
+        const int32 Limit=FMath::Clamp(UAtlasSDKSettings::Get()->MaxConcurrentOutputDownloads, 1, 16);
+        while (NextDownload < DownloadQueue.Num() && DownloadOperations.Num()+PendingArrayWrites < Limit)
+        {
+            if (bCancellationRequested || IsFinished() || !CheckExecutionCredentials()) return;
+            const FString Key=DownloadQueue[NextDownload++]; const FGuid Id=FGuid::NewGuid();
+            DownloadOperations.Add(Id, Key);
+            FGuid Started;
+#if WITH_DEV_AUTOMATION_TESTS
+            if (DownloadDispatcherForTests) Started=DownloadDispatcherForTests(FilesToDownload.FindChecked(Key), Id);
+            else
+#endif
+            Started=FileManager->DownloadFileWithOperationId(GetExecutionWorkflow(), FilesToDownload.FindChecked(Key), Id);
+            if (!Started.IsValid() && DownloadOperations.Contains(Id)) OnFileDownloadFailed(Id, TEXT("Download could not start"), 0, Key);
+        }
+    }
+    UpdateOverallProgress(); CheckDownloadPhaseComplete();
+}
+FString UAtlasJob::DownloadLabel(const FString& Key) const
+{
+    const auto* Target=DownloadTargets.Find(Key);
+    return Target && Target->Index != INDEX_NONE ? FString::Printf(TEXT("%s item %d"), *Target->Parameter, Target->Index+1) : Key;
 }
 
 void UAtlasJob::OnFileDownloadComplete(const FGuid& OperationId, const FString& FileId, const TArray<uint8>& FileData, const FString& OutputName)
 {
-	if (bFinishing || bCancellationRequested || IsFinished()) return;
-	UE_LOG(LogTemp, Log, TEXT("AtlasJob[%s] download complete for '%s': %d bytes"),
-		*JobId.ToString(EGuidFormats::DigitsWithHyphens), *OutputName, FileData.Num());
+    if (bFinishing || bCancellationRequested || IsFinished()) return;
+    const FString Key=OutputName;
+    const FFileTarget Target=DownloadTargets.Contains(Key) ? DownloadTargets[Key] : FFileTarget{Key, INDEX_NONE};
+    if (FAtlasValue* Value=Outputs.Values.Find(Target.Parameter))
+        Value->VisitFile(Target.Index, [&](auto& Item)
+        {
+            Item.FileData=FileData;
+            FString Extension=FileManager ? FileManager->GetDownloadExtension(OperationId) : FString();
+            if (Item.FileName.EndsWith(TEXT(".atlas-context.json"), ESearchCase::IgnoreCase)
+                && (Extension.IsEmpty() || Extension == TEXT("json") || Extension == TEXT("bin"))) Extension=TEXT("atlas-context.json");
+            if (FileData.Num() >= 12)
+            {
+                if (FileData[0]==0x89 && FileData[1]=='P' && FileData[2]=='N' && FileData[3]=='G') Extension=TEXT("png");
+                else if (FileData[0]==0xFF && FileData[1]==0xD8 && FileData[2]==0xFF) Extension=TEXT("jpg");
+                else if (FMemory::Memcmp(FileData.GetData(), "RIFF", 4)==0 && FMemory::Memcmp(FileData.GetData()+8,"WAVE",4)==0) Extension=TEXT("wav");
+                else if (FMemory::Memcmp(FileData.GetData(),"OggS",4)==0) Extension=TEXT("ogg");
+                else if (FMemory::Memcmp(FileData.GetData(),"glTF",4)==0) Extension=TEXT("glb");
+            }
+            if (!Extension.IsEmpty()) Item.FileName=FPaths::GetCleanFilename(FileArchiveName(TEXT("Output_"), Target.Parameter, Target.Index, SafeFileSuffix(TEXT("file.")+Extension)));
+        });
+    DownloadOperations.Remove(OperationId);
+    if (Target.Index != INDEX_NONE) { ArchiveArrayDownload(Key); return; }
+    ++DownloadsCompleted;
+    PumpDownloads();
+}
 
-	// Store the downloaded data
-
-
-	// Update the output value with the file data
-	if (FAtlasValue* OutputValue = Outputs.Values.Find(OutputName))
-	{
-		OutputValue->FileData = FileData;
-		FString Extension = FileManager->GetDownloadExtension(OperationId);
-		// Recognizable bytes take precedence over MIME/schema labels.
-		if (FileData.Num() >= 12)
-		{
-			if (FileData[0] == 0x89 && FileData[1] == 'P' && FileData[2] == 'N' && FileData[3] == 'G') Extension = TEXT("png");
-			else if (FileData[0] == 0xFF && FileData[1] == 0xD8 && FileData[2] == 0xFF) Extension = TEXT("jpg");
-			else if (FMemory::Memcmp(FileData.GetData(), "RIFF", 4) == 0 && FMemory::Memcmp(FileData.GetData() + 8, "WAVE", 4) == 0) Extension = TEXT("wav");
-			else if (FMemory::Memcmp(FileData.GetData(), "OggS", 4) == 0) Extension = TEXT("ogg");
-			else if (FMemory::Memcmp(FileData.GetData(), "glTF", 4) == 0) Extension = TEXT("glb");
-		}
-		if (!Extension.IsEmpty()) OutputValue->FileName = TEXT("Output_") + AtlasArchive::Component(OutputName) + TEXT(".") + Extension;
-	}
-
-	DownloadOperations.Remove(OperationId);
-	DownloadsCompleted++;
-
-	UpdateOverallProgress();
-	CheckDownloadPhaseComplete();
+void UAtlasJob::RetainArrayBytes(FAtlasFileReference& Item, const FString& Label)
+{
+    const int64 Limit=int64(FMath::Max(0,UAtlasSDKSettings::Get()->MaxRetainedArrayOutputMB))*1024*1024;
+    if (RetainedArrayBytes + Item.FileData.Num() > Limit)
+    {
+        Item.FileData.Empty();
+        const FString Warning=TEXT("In-memory output limit reached; file ID retained for retrieval");
+        Item.Warning += (Item.Warning.IsEmpty() ? TEXT("") : TEXT("; ")) + Warning;
+        OutputWarnings.Add(Label + TEXT(": ") + Warning);
+    }
+    else RetainedArrayBytes += Item.FileData.Num();
+}
+void UAtlasJob::ArchiveArrayDownload(const FString& Key)
+{
+    const FFileTarget Target=DownloadTargets.FindChecked(Key);
+    auto* Value=Outputs.Values.Find(Target.Parameter);
+    if (!Value || !Value->FileItems.IsValidIndex(Target.Index)) { ++DownloadsCompleted; PumpDownloads(); return; }
+    auto& Item=Value->FileItems[Target.Index];
+    if (!UAtlasSDKSettings::Get()->bAutoSaveOutputFiles)
+    { RetainArrayBytes(Item, DownloadLabel(Key)); ++DownloadsCompleted; PumpDownloads(); return; }
+    auto* Manager=NewObject<UAtlasOutputManager>(this);
+    const auto Folder=Manager->GetJobFolderInfo(this);
+    const FString Path=Folder.OutputsDiskPath / FileArchiveName(TEXT("Output_"),Target.Parameter,Target.Index,SafeFileSuffix(Item.FileName));
+    if (!Folder.IsValid() || !AtlasArchive::IsContained(UAtlasSDKSettings::Get()->GetOutputFolderPath(),Path))
+    {
+        Item.Warning=TEXT("Unsafe output archive path"); OutputWarnings.Add(DownloadLabel(Key)+TEXT(": ")+Item.Warning);
+        RetainArrayBytes(Item,DownloadLabel(Key)); ++DownloadsCompleted; PumpDownloads(); return;
+    }
+    ++PendingArrayWrites;
+    TWeakObjectPtr<UAtlasJob> Weak(this);
+    AtlasFileWork::Enqueue([Weak,Target,Key,Path,Bytes=MoveTemp(Item.FileData)]() mutable
+    {
+        const bool Saved=AtlasArchive::WriteBytes(Path,Bytes.GetData(),Bytes.Num());
+        if (Saved) Bytes.Empty();
+        AsyncTask(ENamedThreads::GameThread,[Weak,Target,Key,Path,Saved,Bytes=MoveTemp(Bytes)]() mutable
+        {
+            TStrongObjectPtr<UAtlasJob> Job(Weak.Get());
+            if (!Job.IsValid()) return;
+            --Job->PendingArrayWrites;
+            if (Job->bCancellationRequested || Job->IsFinished()) return;
+            if (auto* Result=Job->Outputs.Values.Find(Target.Parameter); Result && Result->FileItems.IsValidIndex(Target.Index))
+            {
+                auto& Ref=Result->FileItems[Target.Index];
+                if (Saved) { Ref.FilePath=Path; Ref.FileName=FPaths::GetCleanFilename(Path); }
+                else
+                {
+                    Ref.Warning=TEXT("Could not archive output; file ID retained"); Ref.FileData=MoveTemp(Bytes);
+                    Job->OutputWarnings.Add(Job->DownloadLabel(Key)+TEXT(": ")+Ref.Warning);
+                    Job->RetainArrayBytes(Ref,Job->DownloadLabel(Key));
+                }
+            }
+            ++Job->DownloadsCompleted; Job->PumpDownloads();
+        });
+    });
 }
 
 void UAtlasJob::OnFileDownloadFailed(const FGuid& OperationId, const FString& ErrorMessage, int32 StatusCode, const FString& OutputName)
 {
-	if (bFinishing || bCancellationRequested || IsFinished()) return;
-	UE_LOG(LogTemp, Warning, TEXT("AtlasJob[%s] download failed for '%s': %s (status %d)"),
-		*JobId.ToString(EGuidFormats::DigitsWithHyphens), *OutputName, TEXT("[details omitted]"), StatusCode);
-
-	OutputWarnings.Add(FString::Printf(TEXT("Download %s: %s"), *OutputName, *ErrorMessage));
-	// Don't fail the whole job for download failures - outputs still have FileIds
-	DownloadOperations.Remove(OperationId);
-	DownloadsCompleted++;
-	DownloadFailures++;
-
-	UpdateOverallProgress();
-	CheckDownloadPhaseComplete();
+    if (bFinishing || bCancellationRequested || IsFinished()) return;
+    const FString Key=OutputName;
+    OutputWarnings.Add(FString::Printf(TEXT("Download %s: %s"), *DownloadLabel(Key), *ErrorMessage));
+    if (const auto* Target=DownloadTargets.Find(Key); Target && Target->Index != INDEX_NONE)
+        if (auto* Value=Outputs.Values.Find(Target->Parameter); Value && Value->FileItems.IsValidIndex(Target->Index))
+            Value->FileItems[Target->Index].Warning=ErrorMessage;
+    DownloadOperations.Remove(OperationId); ++DownloadsCompleted; ++DownloadFailures;
+    PumpDownloads();
 }
 
 void UAtlasJob::CheckDownloadPhaseComplete()
 {
-	if (bStartingDownloads || bFinishing || bCancellationRequested || AtlasJobHelpers::IsTerminalState(State))
+	if (bStartingDownloads || PendingArrayWrites > 0 || bFinishing || bCancellationRequested || AtlasJobHelpers::IsTerminalState(State))
 	{
 		return;
 	}
@@ -1127,8 +1225,7 @@ void UAtlasJob::FinalizeCompletion()
 	for (auto& Pair : Outputs.Values)
 	{
 		if ((!Pair.Value.IsFileType() && !Pair.Value.IsFileId()) || Pair.Value.FileData.IsEmpty()) continue;
-		FString Extension = FPaths::GetExtension(Pair.Value.FileName).ToLower();
-		if (Extension.IsEmpty() || Extension.Len() > 12 || !Extension.GetCharArray().FilterByPredicate([](TCHAR Ch) { return Ch && !FChar::IsAlnum(Ch); }).IsEmpty()) Extension = TEXT("bin");
+		const FString Extension = SafeFileSuffix(Pair.Value.FileName);
 		const FString Path = Folder.OutputsDiskPath / (TEXT("Output_") + AtlasArchive::Component(Pair.Key) + TEXT(".") + Extension);
 		if (!Folder.IsValid() || !AtlasArchive::IsContained(Root, Path)) { OutputWarnings.Add(TEXT("Unsafe output archive path")); continue; }
 		Writes.Add({ Pair.Key, Path, MoveTemp(Pair.Value.FileData), false });

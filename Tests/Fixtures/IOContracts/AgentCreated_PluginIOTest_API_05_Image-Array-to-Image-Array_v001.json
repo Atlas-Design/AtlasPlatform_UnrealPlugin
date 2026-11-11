@@ -1,0 +1,24 @@
+{
+  "version": "0.2",
+  "api_id": "5ab4e92d-290e-46ed-846b-93b7ff1f6a9a",
+  "base_url": "https://api.dev.atlas.design",
+  "name": "AgentCreated | Plugin IO Test | API | 05 Image Array to Image Array | v001",
+  "inputs": [
+    {
+      "id": "images_input",
+      "label": "images_input",
+      "type": "image",
+      "required": true,
+      "isArray": true,
+      "default_value": []
+    }
+  ],
+  "outputs": [
+    {
+      "id": "images_output",
+      "type": "image",
+      "isArray": true,
+      "format": "png"
+    }
+  ]
+}

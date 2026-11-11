@@ -1,0 +1,22 @@
+{
+  "version": "0.2",
+  "api_id": "e42aac83-1e53-4c34-ac5a-35b8c0356eea",
+  "base_url": "https://api.dev.atlas.design",
+  "name": "AgentCreated | Plugin IO Test | API | 04 Image to Image | v001",
+  "inputs": [
+    {
+      "id": "image_input",
+      "label": "image_input",
+      "type": "image",
+      "required": true,
+      "default_value": null
+    }
+  ],
+  "outputs": [
+    {
+      "id": "image_output",
+      "type": "image",
+      "format": "png"
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "version": "0.2",
+  "api_id": "ca4ce13f-143c-4d27-bd8a-487338253fab",
+  "base_url": "https://api.dev.atlas.design",
+  "name": "AgentCreated | Plugin IO Test | API | 01 Boolean to Boolean | v001",
+  "inputs": [
+    {
+      "id": "boolean_input",
+      "label": "boolean_input",
+      "type": "boolean",
+      "required": true,
+      "default_value": true
+    }
+  ],
+  "outputs": [
+    {
+      "id": "boolean_output",
+      "type": "boolean"
+    }
+  ]
+}

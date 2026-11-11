@@ -255,6 +255,7 @@ private:
 	TMap<FString, FDelegateHandle> DirectoryWatchHandles;
 #endif
 #if WITH_DEV_AUTOMATION_TESTS
+	friend struct FAtlasArrayTestAccess;
 	friend struct FAtlasNonBatchTestAccess;
 	friend struct FAtlasHistoryIndexTestAccess;
 	FString TestHistoryDirectory;

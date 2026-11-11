@@ -34,6 +34,7 @@ public class AtlasSDK : ModuleRules
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
+				"Projects", // Resolve plugin-owned contract fixtures in development tests
 				"Slate",
 				"SlateCore",
 				"AssetRegistry",

@@ -23,6 +23,9 @@ struct FAtlasNonBatchTestAccess
 {
  static void Directory(UAtlasHistoryManager* M, const FString& P) { M->TestHistoryDirectory=P; }
  static bool Parse(UAtlasJob* J, UAtlasJsonObject* R) { return J->ParseStatusResponse(R); }
+ static UAtlasJsonObject* Payload(UAtlasJob* J) { return J->BuildExecutePayload(); }
+ static int32 UploadCount(UAtlasJob* J) { J->ScanInputsForUploads(); return J->FilesToUpload.Num(); }
+ static void Finish(UAtlasJob* J) { J->FinalizeCompletion(); }
  static FString Key(const FString& Url) { return UAtlasFileManager::CacheKeyFor(Url, TEXT("same-file")); }
  static void Seed(UAtlasFileManager* M, double Time) { M->UploadCache.Add(TEXT("k"), TEXT("id")); M->UploadCacheTimes.Add(TEXT("k"), Time); }
  static void Prune(UAtlasFileManager* M) { M->PruneCaches(); }
@@ -71,7 +74,8 @@ bool FAtlasResponseContracts::RunTest(const FString&)
  TestTrue(TEXT("Absent upper bound does not become one"),Schema.Inputs[0].ValidateValue(FAtlasValue::MakeNumber(100),Error));
  TestFalse(TEXT("Lower bound enforced"),Schema.Inputs[0].ValidateValue(FAtlasValue::MakeNumber(1),Error));
  TestFalse(TEXT("Bad array rejected"),UAtlasWorkflowAsset::ParseSchemaFromJson(Prefix+TEXT("\"inputs\":{}}"),Schema,Error));
- TestFalse(TEXT("Unknown parameter type rejected"),UAtlasWorkflowAsset::ParseSchemaFromJson(Prefix+TEXT("\"inputs\":[{\"name\":\"x\",\"type\":\"typo\"}]}"),Schema,Error));
+ TestTrue(TEXT("Unknown parameter type remains visible"),UAtlasWorkflowAsset::ParseSchemaFromJson(Prefix+TEXT("\"inputs\":[{\"name\":\"x\",\"type\":\"typo\"}]}"),Schema,Error));
+ TestFalse(TEXT("Unknown type cannot execute"),Schema.Inputs[0].ValidateValue(FAtlasValue::MakeString(TEXT("x")),Error));
  FAtlasValue File; File.Type=EAtlasValueType::Image; File.FileId=TEXT("file-1"); TestEqual(TEXT("Typed file getter"),File.GetFileId(),File.FileId);
  const FString Unicode=TEXT("caf\u00e9/\u4e16\u754c"); TestEqual(TEXT("UTF8 URL round trip"),UAtlasHttpLibrary::PercentDecode(UAtlasHttpLibrary::PercentEncode(Unicode)),Unicode);
  const FAtlasError Http=FAtlasError::FromHttpStatus(429,TEXT("{\"error\":{\"message\":\"quota detail\",\"node_name\":\"node\"}}"));
@@ -81,6 +85,40 @@ bool FAtlasResponseContracts::RunTest(const FString&)
  Response->DecodeJson(TEXT("{\"result\":{\"outputs\":{\"result\":[1,{\"a\":true}]}}}"));
  TestTrue(TEXT("JSON arrays accepted"),FAtlasNonBatchTestAccess::Parse(Job.Get(),Response.Get()));
  TestTrue(TEXT("Array remains JSON"),Job->Outputs.Values[TEXT("result")].JsonValue.StartsWith(TEXT("[")));
+ Def.Type=EAtlasValueType::Image; Def.Format=TEXT("png"); Workflow->Schema.Outputs={Def};
+ Response->DecodeJson(TEXT(R"({"status":"completed","result":{"outputs":{"result":"a439f5b9-9b37-4a52-8d9d-441c142291c5"},"success":true},"mode":"async"})"));
+ TestTrue(TEXT("Observed live async file ID contract accepted"),FAtlasNonBatchTestAccess::Parse(Job.Get(),Response.Get()));
+ TestEqual(TEXT("Returned file ID retained"),Job->Outputs.Values[TEXT("result")].FileId,FString(TEXT("a439f5b9-9b37-4a52-8d9d-441c142291c5")));
+ Def.Type=EAtlasValueType::File; Def.OriginalType=TEXT("agent_context"); Def.Format=TEXT("atlas-context.json"); Workflow->Schema.Outputs={Def};
+ TestTrue(TEXT("Context output parses"),FAtlasNonBatchTestAccess::Parse(Job.Get(),Response.Get()));
+ const auto Context=Job->Outputs.Values[TEXT("result")];
+ TestTrue(TEXT("Compound suffix preserved"),Context.FileName.EndsWith(TEXT(".atlas-context.json")));
+ TestEqual(TEXT("Format survives file-data stripping"),Context.WithoutFileData().FileFormat,Def.Format);
+ const FString HistoryRoot=FPaths::ProjectSavedDir()/TEXT("Automation/SingleFileHistory")/FGuid::NewGuid().ToString(EGuidFormats::Digits);
+ TStrongObjectPtr<UAtlasHistoryManager> History(NewObject<UAtlasHistoryManager>()); FAtlasNonBatchTestAccess::Directory(History.Get(),HistoryRoot);
+ FAtlasJobHistoryRecord Record; Record.JobId=FGuid::NewGuid(); Record.ApiId=TEXT("file-contract"); Record.StartedAt=Record.CompletedAt=FDateTime::UtcNow();
+ Record.Inputs.Values.Add(TEXT("context"),Context.WithoutFileData()); Record.Outputs.Values.Add(TEXT("context"),Context);
+ TestTrue(TEXT("Persist file metadata"),History->SaveRecord(Record));
+ History->RefreshHistory(); FAtlasJobHistoryRecord Reloaded;
+ TestTrue(TEXT("Reload file metadata"),History->FindRecord(Record.JobId,Reloaded));
+ TestEqual(TEXT("Input ID preserved for reuse"),Reloaded.Inputs.Values.FindChecked(TEXT("context")).FileId,Context.FileId);
+ TestEqual(TEXT("Output type preserved"),Reloaded.Outputs.Values.FindChecked(TEXT("context")).OriginalType,Def.OriginalType);
+ TestEqual(TEXT("Output format preserved"),Reloaded.Outputs.Values.FindChecked(TEXT("context")).FileFormat,Def.Format);
+ auto* Settings=GetMutableDefault<UAtlasSDKSettings>(); const auto OldOutput=Settings->OutputFolder; const bool OldSave=Settings->bAutoSaveOutputFiles;
+ ON_SCOPE_EXIT { Settings->OutputFolder=OldOutput; Settings->bAutoSaveOutputFiles=OldSave; };
+ Settings->OutputFolder.Path=HistoryRoot/TEXT("Output"); Settings->bAutoSaveOutputFiles=true;
+ TStrongObjectPtr<UAtlasJob> SavedJob(NewObject<UAtlasJob>()); SavedJob->Initialize(TEXT("file-contract"),TEXT("Fixture"),Record.Inputs);
+ TestEqual(TEXT("Existing ID creates no upload"),FAtlasNonBatchTestAccess::UploadCount(SavedJob.Get()),0);
+ TestEqual(TEXT("Existing ID serialized as scalar UUID"),FAtlasNonBatchTestAccess::Payload(SavedJob.Get())->GetStringField(TEXT("context")),Context.FileId);
+ SavedJob->Outputs=Record.Outputs; SavedJob->Outputs.Values[TEXT("context")].FileData={123,125};
+ FAtlasNonBatchTestAccess::Finish(SavedJob.Get()); AtlasFileWork::Drain();
+ const auto& SavedValue=SavedJob->Outputs.Values.FindChecked(TEXT("context"));
+ TestTrue(TEXT("Archive retains compound suffix"),SavedValue.FilePath.EndsWith(TEXT(".atlas-context.json")));
+ TArray<uint8> SavedBytes; FFileHelper::LoadFileToArray(SavedBytes,*SavedValue.FilePath);
+ TestTrue(TEXT("Archive retains original bytes"),SavedBytes==TArray<uint8>({123,125}));
+ Def.Format=TEXT("../escape"); Workflow->Schema.Outputs={Def};
+ TestTrue(TEXT("Untrusted suffix falls back"),FAtlasNonBatchTestAccess::Parse(Job.Get(),Response.Get()));
+ TestTrue(TEXT("Unsafe suffix cannot escape"),Job->Outputs.Values[TEXT("result")].FileName.EndsWith(TEXT(".bin")));
  Response->DecodeJson(TEXT("{\"result\":{\"outputs\":{}}}")); TestFalse(TEXT("Missing output rejected"),FAtlasNonBatchTestAccess::Parse(Job.Get(),Response.Get()));
  return true;
 }

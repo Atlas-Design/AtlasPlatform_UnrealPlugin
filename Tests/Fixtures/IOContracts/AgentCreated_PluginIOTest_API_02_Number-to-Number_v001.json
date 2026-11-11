@@ -1,0 +1,21 @@
+{
+  "version": "0.2",
+  "api_id": "2b3a3463-a36b-493e-b81f-99a11a1c0db9",
+  "base_url": "https://api.dev.atlas.design",
+  "name": "AgentCreated | Plugin IO Test | API | 02 Number to Number | v001",
+  "inputs": [
+    {
+      "id": "number_input",
+      "label": "number_input",
+      "type": "number",
+      "required": true,
+      "default_value": 42
+    }
+  ],
+  "outputs": [
+    {
+      "id": "number_output",
+      "type": "number"
+    }
+  ]
+}

@@ -352,11 +352,10 @@ bool UAtlasUIHelpers::ValidateFilePath(const FString& FilePath, EAtlasValueType 
 	// Check extension if we have allowed extensions
 	if (AllowedExtensions.Num() > 0)
 	{
-		FString Extension = FPaths::GetExtension(FilePath).ToLower();
 		bool bAllowed = false;
 		for (const FString& AllowedExt : AllowedExtensions)
 		{
-			if (Extension == AllowedExt.ToLower())
+			if (FPaths::GetCleanFilename(FilePath).EndsWith(TEXT(".") + AllowedExt.ToLower(), ESearchCase::IgnoreCase))
 			{
 				bAllowed = true;
 				break;

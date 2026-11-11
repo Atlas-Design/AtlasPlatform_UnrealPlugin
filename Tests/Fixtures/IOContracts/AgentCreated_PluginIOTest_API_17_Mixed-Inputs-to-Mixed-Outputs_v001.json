@@ -1,0 +1,107 @@
+{
+  "version": "0.2",
+  "api_id": "493d0970-349b-4d06-9c58-1b38c9c19859",
+  "base_url": "https://api.dev.atlas.design",
+  "name": "AgentCreated | Plugin IO Test | API | 17 Mixed Inputs to Mixed Outputs | v001",
+  "inputs": [
+    {
+      "id": "number_input",
+      "label": "number_input",
+      "type": "number",
+      "required": true,
+      "default_value": 42
+    },
+    {
+      "id": "images_input",
+      "label": "images_input",
+      "type": "image",
+      "required": true,
+      "isArray": true,
+      "default_value": []
+    },
+    {
+      "id": "audio_input",
+      "label": "audio_input",
+      "type": "audio",
+      "required": true,
+      "default_value": null
+    },
+    {
+      "id": "text_input",
+      "label": "text_input",
+      "type": "string",
+      "required": true,
+      "default_value": "Hello from Redcap's garden!"
+    },
+    {
+      "id": "boolean_input",
+      "label": "boolean_input",
+      "type": "boolean",
+      "required": true,
+      "default_value": true
+    },
+    {
+      "id": "image_input",
+      "label": "image_input",
+      "type": "image",
+      "required": true,
+      "default_value": null
+    },
+    {
+      "id": "mesh_input",
+      "label": "mesh_input",
+      "type": "mesh",
+      "required": true,
+      "default_value": null
+    },
+    {
+      "id": "meshes_input",
+      "label": "meshes_input",
+      "type": "mesh",
+      "required": true,
+      "isArray": true,
+      "default_value": []
+    }
+  ],
+  "outputs": [
+    {
+      "id": "number_output",
+      "type": "number"
+    },
+    {
+      "id": "images_output",
+      "type": "image",
+      "isArray": true,
+      "format": "png"
+    },
+    {
+      "id": "audio_output",
+      "type": "audio",
+      "format": "mp3"
+    },
+    {
+      "id": "text_output",
+      "type": "string"
+    },
+    {
+      "id": "boolean_output",
+      "type": "boolean"
+    },
+    {
+      "id": "image_output",
+      "type": "image",
+      "format": "png"
+    },
+    {
+      "id": "mesh_output",
+      "type": "mesh",
+      "format": "glb"
+    },
+    {
+      "id": "meshes_output",
+      "type": "mesh",
+      "isArray": true,
+      "format": "glb"
+    }
+  ]
+}

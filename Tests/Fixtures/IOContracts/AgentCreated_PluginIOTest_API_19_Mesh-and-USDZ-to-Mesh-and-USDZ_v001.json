@@ -1,0 +1,34 @@
+{
+  "version": "0.2",
+  "api_id": "80cd29c6-bd3a-4636-897f-d54b5f2eb670",
+  "base_url": "https://api.dev.atlas.design",
+  "name": "AgentCreated | Plugin IO Test | API | 19 Mesh and USDZ to Mesh and USDZ | v001",
+  "inputs": [
+    {
+      "id": "glb_input",
+      "label": "glb_input",
+      "type": "mesh",
+      "required": true,
+      "default_value": null
+    },
+    {
+      "id": "usdz_input",
+      "label": "usdz_input",
+      "type": "usdz",
+      "required": true,
+      "default_value": null
+    }
+  ],
+  "outputs": [
+    {
+      "id": "glb_output",
+      "type": "mesh",
+      "format": "glb"
+    },
+    {
+      "id": "usdz_output",
+      "type": "usdz",
+      "format": "usdz"
+    }
+  ]
+}

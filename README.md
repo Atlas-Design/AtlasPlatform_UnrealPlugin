@@ -89,9 +89,11 @@ Whether you're generating textures, creating 3D models, or running complex multi
 
 ### Intelligent Input System
 - 🎨 **Image Inputs** — Use project textures or external file paths
-- 🧊 **Mesh Inputs** — Static meshes, skeletal meshes, or external GLB/FBX files
+- 🧊 **Mesh Inputs** — Static meshes exported as GLB, or compatible external files
 - 🔢 **Primitive Inputs** — Booleans, integers, floats, and strings
-- 📂 **Flexible Sources** — Project assets or file system paths
+- 📂 **Flexible Sources** — Compact cards for files, compatible project assets, and Atlas asset IDs
+- 📚 **Ordered file arrays** — Multi-file selection, replacement, drag/drop, and keyboard reordering
+- 🎛️ **Optional inputs** — Server defaults remain distinct from explicit false, zero, empty text, and empty lists
 
 ### Execution & Monitoring
 - ▶️ **One-Click Execution** — Run workflows from Editor UI or Blueprint
@@ -260,11 +262,25 @@ In the same settings page, adjust:
 #### Step 5: Configure and Execute
 
 1. Select the imported workflow from the dropdown
-2. Configure input values using the input panel (choose between "From File" or "From Project" for assets)
+2. Configure input values; use **Browse...**, the source dialog, or **Replace** on file cards
 3. Click **Run [Workflow Name]** to execute
 4. Monitor progress in the Workflow Editor; completed runs write files under your **Output Folder**
 
 ---
+
+### File inputs, arrays, and defaults
+
+File inputs show compact cards with a preview or type icon, filename, source, and status. Choose local files, compatible Unreal assets, or existing Atlas asset IDs in the source dialog. Cancelling preserves the selection. Asset IDs must be accessible to your workspace and service environment.
+
+- Use **Browse...** for a single file or **Add files...** for a list. Drop compatible files or Content Browser assets onto an input; a card accepts one replacement, and the list append area accepts multiple items.
+- Invalid or mixed valid/invalid drops, folders, and multiple items targeting a single input are rejected without changing the selection. Lists preserve order and intentional duplicates.
+- Reorder with the drag handle, **Alt+Up/Down**, or the item menu. Remove individual cards without clearing the list.
+- Explicitly optional inputs offer a server-default toggle. It omits the request key while preserving the selection. False, zero, empty text, and an enabled empty array remain explicit values. Exports without optional flags cannot reliably expose this toggle.
+- Boolean fields show their value; numeric fields validate input; long text supports an expanded editor.
+
+Supported file families include images, meshes, audio, video, EXR, USDZ, scene files, PDFs, animation containers, and conversation/context files, including ordered arrays. Context inputs are file references. Unknown schema types remain visible as unsupported. File extensions must match the declared type and explicit format constraints. Transfer support does not imply native preview or import support.
+
+Unreal textures export to PNG and static meshes to GLB when you run. Typed texture inputs such as EXR and SoundWave inputs require an accessible original source file. Arbitrary scene, actor, component, skeletal-animation, and video exports are not provided; use original files or Atlas IDs. Selecting or previewing an input never uploads or imports it. Audio/video playback is an explicit action in the OS-associated application.
 
 ### Working with Outputs
 
@@ -281,7 +297,11 @@ When a run completes, the plugin archives everything under your configured **Out
 - **`outputs/`** — Generated files from the platform  
 - **`job.json`** — Run metadata (state, IDs, paths)
 
-Use the Workflow Editor **Import** actions (or Blueprint/runtime import APIs) to bring textures and meshes into the Content Browser. Prefer import over manually copying files from `outputs/` so paths stay consistent with the plugin.
+Workflow history displays saved inputs as read-only cards, distinguishing omitted inputs, empty arrays, missing files, and ID-only references. Recorded inputs do not silently switch to changed project assets. History filters help narrow the displayed runs.
+
+Output cards offer per-item **Import**, **Import all**, **Show in Browser**, Save As, Reveal, Copy ID, and native Reimport where supported. Imported status is restored when reopening history. Mesh insertion into the level is explicit and supports Undo. Native importer availability determines which formats can be imported; other formats remain downloadable files. Rich mesh previews without importing are not implemented.
+
+Prefer these import actions over manually copying files into the project. New import destinations distinguish the run, parameter, and array item to prevent collisions between identical filenames.
 
 #### Content Browser layout
 
@@ -291,7 +311,7 @@ By default, imported assets go to:
 Content/Atlas/Imported/{WorkflowName}/{RunFolder}/
 ```
 
-> **Blueprint migration:** If you maintain Editor Utility Widgets or graphs that manually build old flat output paths, see [`Docs/BlueprintMigrationGuide.md`](Docs/BlueprintMigrationGuide.md).
+> New file-card imports add parameter/item-specific destinations beneath the run folder. Existing scalar imports are reused only when their filename is unambiguous.
 
 ---
 
@@ -410,6 +430,8 @@ Initializing → Uploading → Executing → Downloading → Done
 
 ### Input Types
 
+The table below lists basic scalar helpers. Additional file families and arrays use file references (`FAtlasFileReference`, `FAtlasValue::MakeFileList`) and retain server IDs and format information. Declared file formats are validated.
+
 | Type | Blueprint | C++ Setter | Value |
 |------|-----------|------------|-------|
 | `string` | String | `SetString()` | Text value |
@@ -424,6 +446,8 @@ Initializing → Uploading → Executing → Downloading → Done
 
 ### Output Types
 
+Additional file families retain downloaded paths and Atlas IDs; arrays retain ordered per-item references. These scalar accessors are not an exhaustive type list.
+
 | Type | Result | Access Method |
 |------|--------|---------------|
 | `string` | Text | `GetString()` |
@@ -435,6 +459,12 @@ Initializing → Uploading → Executing → Downloading → Done
 | `json` | JSON string | `GetJson()` |
 
 ---
+
+### Editor customization and validation
+
+Workflow widget behavior now lives in C++; Editor Utility Widget layouts remain editable in the Designer. Preserve named bound controls and their types when restyling. File cards use `WBP_AtlasFileCard` and `WBP_AtlasFilePanel`; existing picker and row wrappers remain available. Widget migration is an explicit developer operation (`-run=AtlasWidgetMigration -FileParity`), backs up affected assets, and does not run on startup.
+
+Recorded validation covers a UE 5.5 Development Editor build, automated schema/selection/history/input checks, and DirectX 12 offscreen renders of saved widgets. Native drag gestures, picker cancellation, clipboard/media actions, DPI/theme appearance, Reimport, Import all clicks, and level-insertion Undo still need manual editor acceptance. The latest changes have not been validated in full runtime/game builds or DirectX 11 rendering. Batch panels remain outside the exposed editor UI.
 
 ## ⚙️ Configuration
 

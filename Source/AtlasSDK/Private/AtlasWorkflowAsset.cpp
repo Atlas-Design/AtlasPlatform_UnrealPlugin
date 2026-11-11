@@ -192,8 +192,17 @@ bool UAtlasWorkflowAsset::ParseParameterDef(const TSharedPtr<FJsonObject>& JsonO
 	{
 		OutDef.Type = StringToValueType(TypeString);
 		if (OutDef.Type == EAtlasValueType::String && !TypeString.Equals(TEXT("string"), ESearchCase::IgnoreCase) && !TypeString.Equals(TEXT("text"), ESearchCase::IgnoreCase))
-		{ OutError = FString::Printf(TEXT("Unsupported parameter type: %s"), *TypeString); return false; }
+		{ OutDef.Type=EAtlasValueType::None; }
 	}
+
+	OutDef.OriginalType = TypeString.IsEmpty() ? TEXT("string") : TypeString.ToLower();
+	if (JsonObject->HasField(TEXT("isArray")) && (JsonObject->TryGetField(TEXT("isArray"))->Type != EJson::Boolean || !JsonObject->TryGetBoolField(TEXT("isArray"), OutDef.bIsArray)))
+	{ OutError = TEXT("isArray must be a boolean"); return false; }
+	if (OutDef.bIsArray && !OutDef.IsFileType())
+	{ OutError = TEXT("Only file parameters support arrays"); return false; }
+	OutDef.bHasRequiredMetadata = JsonObject->HasField(TEXT("required"));
+	if (OutDef.bHasRequiredMetadata && (JsonObject->TryGetField(TEXT("required"))->Type != EJson::Boolean || !JsonObject->TryGetBoolField(TEXT("required"), OutDef.bRequired)))
+	{ OutError = TEXT("required must be a boolean"); return false; }
 
 	// Default value - handle multiple field names and non-string types
 	// Try "default", "defaultValue", "default_value"
@@ -214,6 +223,15 @@ bool UAtlasWorkflowAsset::ParseParameterDef(const TSharedPtr<FJsonObject>& JsonO
 	if (DefaultField && DefaultField->IsValid())
 	{
 		const TSharedPtr<FJsonValue>& DefaultValue = *DefaultField;
+		OutDef.bHasDefaultValue = true;
+		OutDef.bDefaultIsNull = DefaultValue->Type == EJson::Null;
+		FJsonSerializer::Serialize(DefaultValue.ToSharedRef(), TEXT(""), TJsonWriterFactory<>::Create(&OutDef.DefaultValueJson));
+		if (!OutDef.bDefaultIsNull && OutDef.bIsArray)
+		{
+			if (DefaultValue->Type != EJson::Array) { OutError = TEXT("File-list default must be an array or null"); return false; }
+			for (const auto& Item : DefaultValue->AsArray())
+				if (!Item.IsValid() || Item->Type != EJson::String) { OutError = TEXT("File-list default items must be file ID strings"); return false; }
+		}
 		switch (DefaultValue->Type)
 		{
 		case EJson::String:
@@ -266,8 +284,20 @@ bool UAtlasWorkflowAsset::ParseParameterDef(const TSharedPtr<FJsonObject>& JsonO
 	FString FormatStr;
 	if (JsonObject->TryGetStringField(TEXT("format"), FormatStr))
 	{
-		OutDef.Format = FormatStr;
+		OutDef.Format = FormatStr; OutDef.bHasExplicitFormat=true;
 		OutDef.AllowedExtensions.Add(FormatStr);
+	}
+
+	// Typed file tokens supply an extension when input definitions omit format.
+	if (OutDef.Format.IsEmpty())
+	{
+		static const TMap<FString,FString> Formats = {
+			{TEXT("video"),TEXT("mp4")},{TEXT("exr"),TEXT("exr")},{TEXT("pdf"),TEXT("pdf")},
+			{TEXT("fbx"),TEXT("fbx")},{TEXT("usdz"),TEXT("usdz")},{TEXT("scene"),TEXT("blend")},{TEXT("rig_animation"),TEXT("glb")},
+			{TEXT("agent_context"),TEXT("atlas-context.json")},{TEXT("jpeg"),TEXT("jpg")},{TEXT("tga"),TEXT("tga")},
+			{TEXT("tiff"),TEXT("tiff")},{TEXT("webp"),TEXT("webp")},{TEXT("avif"),TEXT("avif")},{TEXT("svg"),TEXT("svg")}};
+		if (const FString* Format = Formats.Find(OutDef.OriginalType))
+		{ OutDef.Format = *Format; }
 	}
 
 	// Also try array fields for extensions
@@ -342,7 +372,14 @@ EAtlasValueType UAtlasWorkflowAsset::StringToValueType(const FString& TypeString
 		return EAtlasValueType::Json;
 	}
 
-	// Default to string
+	if (LowerType == TEXT("jpeg") || LowerType == TEXT("tga") || LowerType == TEXT("tiff") || LowerType == TEXT("exr"))
+		return EAtlasValueType::Image;
+	// File transport only. These must not promise a texture/static-mesh import adapter.
+	if (LowerType == TEXT("video") || LowerType == TEXT("pdf") || LowerType == TEXT("fbx") || LowerType == TEXT("usdz")
+		|| LowerType == TEXT("scene") || LowerType == TEXT("rig_animation") || LowerType == TEXT("agent_context")
+		|| LowerType == TEXT("webp") || LowerType == TEXT("avif") || LowerType == TEXT("svg"))
+		return EAtlasValueType::File;
+	// ParseParameterDef rejects unrecognized tokens that reach this legacy fallback.
 	return EAtlasValueType::String;
 }
 

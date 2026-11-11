@@ -1,0 +1,22 @@
+{
+  "version": "0.2",
+  "api_id": "1051b092-1e7c-4f4b-871a-f2c57e1e6249",
+  "base_url": "https://api.dev.atlas.design",
+  "name": "AgentCreated | Plugin IO Test | API | 08 Audio to Audio | v001",
+  "inputs": [
+    {
+      "id": "audio_input",
+      "label": "audio_input",
+      "type": "audio",
+      "required": true,
+      "default_value": null
+    }
+  ],
+  "outputs": [
+    {
+      "id": "audio_output",
+      "type": "audio",
+      "format": "mp3"
+    }
+  ]
+}

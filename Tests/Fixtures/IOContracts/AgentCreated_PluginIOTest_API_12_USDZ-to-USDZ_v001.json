@@ -1,0 +1,22 @@
+{
+  "version": "0.2",
+  "api_id": "403935bb-eb65-4b3c-a1e4-42024c7277fa",
+  "base_url": "https://api.dev.atlas.design",
+  "name": "AgentCreated | Plugin IO Test | API | 12 USDZ to USDZ | v001",
+  "inputs": [
+    {
+      "id": "usdz_input",
+      "label": "usdz_input",
+      "type": "usdz",
+      "required": true,
+      "default_value": null
+    }
+  ],
+  "outputs": [
+    {
+      "id": "usdz_output",
+      "type": "usdz",
+      "format": "usdz"
+    }
+  ]
+}

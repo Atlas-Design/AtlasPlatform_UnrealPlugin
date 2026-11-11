@@ -5,6 +5,8 @@
 #include "Types/AtlasSchemaTypes.h"
 #include "AtlasNativeInputWidgets.generated.h"
 
+class UAtlasFilePanel;
+class UEditableTextBox;
 class UButton;
 class UTextBlock;
 class UWidgetSwitcher;
@@ -35,6 +37,8 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Atlas|Appearance") FText EmptyPathText = NSLOCTEXT("Atlas", "NoSelectedFile", "Select a file");
 	UFUNCTION(BlueprintCallable, Category="Atlas|File") void ConfigurePicker(EAtlasValueType InType, const TArray<FString>& InAllowedExtensions);
 	UFUNCTION(BlueprintCallable, Category="Atlas|File") void SelectFile(const FString& Path);
+	UFUNCTION(BlueprintCallable, Category="Atlas|File") void SelectAssetId(const FString& InAssetId);
+	UFUNCTION(BlueprintPure, Category="Atlas|File") FString GetSelectedAssetId() const;
 	UFUNCTION(BlueprintCallable, Category="Atlas|File") void SetPickerMode(int32 Mode);
 	UFUNCTION(BlueprintCallable, Category="Atlas|File") FString ResolveImagePath();
 	UFUNCTION(BlueprintCallable, Category="Atlas|File") FString ResolveMeshPath();
@@ -43,6 +47,7 @@ public:
 protected:
 	virtual void NativeConstruct() override;
 	virtual void NativeDestruct() override;
+	UPROPERTY(meta=(BindWidgetOptional)) TObjectPtr<UEditableTextBox> AssetIdInput;
 	UPROPERTY(meta=(BindWidget)) TObjectPtr<UButton> EditorUtilityButton_FromFile;
 	UPROPERTY(meta=(BindWidget)) TObjectPtr<UButton> EditorUtilityButton_FromProject;
 	UPROPERTY(meta=(BindWidget)) TObjectPtr<UButton> EditorUtilityButton_BrowseFile;
@@ -55,6 +60,10 @@ private:
 	UPROPERTY(Transient) TArray<FString> AllowedExtensions;
 	TWeakObjectPtr<UObject> CachedAsset;
 	FString CachedExport;
+	FString SelectedAssetId;
+	bool bUpdatingId = false;
+	bool CanUseProject() const;
+	UFUNCTION() void AssetIdChanged(const FText& InText);
 	bool bReady = false;
 	FDelegateHandle AssetModifiedHandle;
 	void AssetModified(UObject* Object);
@@ -72,6 +81,19 @@ class ATLASWORKFLOWUI_API UAtlasInputFieldWidget : public UEditorUtilityWidget
 	GENERATED_BODY()
 public:
 	UAtlasInputFieldWidget();
+    UPROPERTY(BlueprintReadOnly,Category="Atlas|Input") bool bUseServerDefault=false;
+    UPROPERTY(BlueprintReadWrite,Category="Atlas|Input") FString ServiceOrigin;
+    UPROPERTY(meta=(BindWidgetOptional)) TObjectPtr<UAtlasFilePanel> FileSelector;
+    UPROPERTY(meta=(BindWidgetOptional)) TObjectPtr<UCheckBox> UseServerDefault;
+    UPROPERTY(meta=(BindWidgetOptional)) TObjectPtr<UWidget> OptionalControls;
+    UPROPERTY(meta=(BindWidgetOptional)) TObjectPtr<UTextBlock> ValidationMessage;
+    UPROPERTY(meta=(BindWidgetOptional)) TObjectPtr<UButton> ExpandTextButton;
+    UPROPERTY(meta=(BindWidgetOptional)) TObjectPtr<UTextBlock> BooleanValueLabel;
+    bool ValidateSelection(FString& Error);
+    bool PrepareValue(FAtlasValue& Value,FString& Error);
+    void InvalidateSelection();
+    int64 DefinitionRevision=0;
+
 	// Names retained for existing CreateWidget pins and callers.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Atlas|Input", meta=(ExposeOnSpawn=true)) FAtlasParameterDef currentDefParameter;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Atlas|Input", meta=(ExposeOnSpawn=true)) FAtlasValue defaultValue;
@@ -106,5 +128,9 @@ private:
 	UFUNCTION() void NumberCommitted(float Number, ETextCommit::Type Method);
 	UFUNCTION() void TextCommitted(const FText& Text, ETextCommit::Type Method);
 	UFUNCTION() void FileChanged(const FString& Path);
+    UFUNCTION() void DefaultChanged(bool Checked);
+    UFUNCTION() void SelectionChanged();
+    UFUNCTION() void ExpandText();
+    void UpdatePresence();
 	void NotifyChanged();
 };
